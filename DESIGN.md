@@ -363,6 +363,36 @@ drop straight in; recorder-specific fields are additive.
 Aggregation into a `data/<session_id>/session.json` is a **desktop-side** step over a folder of
 sidecars — the app never writes session-level config.
 
+### 10d-bis. VERIFIED on the first real recording (2026-07-28, session `280726_2`)
+First capture from our own app: home balcony, 20:51–21:23, 5-min segments.
+- **Segmenting works.** 4 continuous segments of 300.37 s each; **0.88 s lost over 20 min
+  (0.07 %)**, ~0.29 s per boundary (file close + header patch + sidecar write). Accepted as
+  immaterial. Screen-lock had no effect; zero interruptions logged.
+- **Sidecars complete** — all 21 fields present, `start_iso` parses through `biomon/config.py`.
+- **The Pixel 9a does NOT support `UNPROCESSED`** (`unprocessed_supported: false`); the app
+  fell back to `VOICE_RECOGNITION` and recorded that. **AGC could not be disabled**
+  (`AutomaticGainControl.isAvailable()` == false) — only NS and AEC were. AGC affects
+  amplitude, not spectrum, so it does not threaten the 8–16 kHz discriminator, but recorded
+  levels are not comparable across sessions.
+- **SPECTRAL RESULT — the fallback does NOT low-pass, and our app beats the camera app.**
+  Peak-normalised PSDs show the app's `VOICE_RECOGNITION` WAV continuing smoothly through
+  8–16 kHz to Nyquist (24 kHz) with **no cliff**, while the phone's **camera app shows a hard
+  brick wall at ~17 kHz** — the AAC encoder in the video container, not the microphone.
+  - **Corollary, and it matters for every comparison: all video-derived audio in the existing
+    corpus is truncated at ~17 kHz.** Sessions `020825_0`, `210726_0`, `240726_*`, `260726_0`
+    and `280726_1` are handicapped in exactly the band that discriminates Orthoptera (§3), so
+    their stridulation scores are **not comparable** with anything the app records from here on.
+    Treat pre-app audio as a separate, band-limited source.
+  - Caveat: absence of a cliff refutes spectral filtering only. It says nothing about AGC.
+- **Perch on the balcony**: *Columba palumbus* (Common Wood Pigeon) 12.0, *Turdus merula*
+  (Common Blackbird) 11.3, *Apus apus* (Common Swift) 11.2. Max logit 12.0 and only 6
+  detections passing — the lowest of any session, in the noisiest (heavy traffic). A **third**
+  datapoint that noise depresses true positives rather than inflating false ones (§3b).
+- **Bug found and fixed**: `getLastKnownLocation()` returns null once backgrounded, so lat/lon
+  was null from segment 3 onward. The service now keeps active location updates while
+  recording and caches the last good fix, and the sidecar records `location_age_s` so a stale
+  fix is visible rather than passed off as current.
+
 ### 10e. Known physical limits (set expectations now)
 - **Built-in phone mics cap at 48 kHz** via `AudioRecord` (24 kHz Nyquist). That is ample for
   birds and Orthoptera (Perch's usable band is 0–16 kHz; stridulation 8–16 kHz), and it will
