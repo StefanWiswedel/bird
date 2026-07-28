@@ -79,10 +79,13 @@ On the phone: Settings → About → tap **Build number** ×7 → Developer opti
 **No paid account is needed.** Debug builds are signed with a local debug keystore; the
 $25 Google Play registration is only for publishing to the Play Store.
 
-If Gradle cannot find the SDK, create `recorder/local.properties`:
+If Gradle cannot find the SDK, create `recorder/local.properties` (gitignored):
 ```
-sdk.dir=C\:\\Users\\<you>\\AppData\\Local\\Android\\Sdk
+sdk.dir=C:/Users/<you>/AppData/Local/Android/Sdk
 ```
+**Use forward slashes.** A `.properties` file treats backslash as an escape, so a
+Windows path with single backslashes fails with `IOException: Invalid file path`
+(the `U` in `Users` is read as a malformed unicode escape). This cost a build cycle.
 
 ## After first install — do these once
 
