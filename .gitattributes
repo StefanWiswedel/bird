@@ -1,0 +1,15 @@
+* text=auto
+
+# gradlew is a POSIX shell script — CRLF endings make it unrunnable under
+# Git Bash/WSL. Git warned it would convert these on checkout; pin them.
+gradlew text eol=lf
+*.sh    text eol=lf
+gradlew.bat text eol=crlf
+
+# binary
+*.jar   binary
+*.png   binary
+*.jpg   binary
+*.wav   binary
+*.flac  binary
+*.mp4   binary
