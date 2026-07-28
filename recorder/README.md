@@ -51,14 +51,28 @@ recorder/
 
 ## Build & install
 
-Requires **JDK 17** and the **Android SDK** (platform 35 + build-tools). Easiest path is
-Android Studio, which bundles both; the command line works too.
+**Verified building 2026-07-28** — APK 26 MB, `dk.biomon.recorder`, compileSdk/targetSdk 36.
+
+Requires Android Studio (bundles JDK 21 + SDK). Run its setup wizard once so the SDK exists.
 
 ```bash
 cd recorder
-./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew assembleDebug
+"$LOCALAPPDATA/Android/Sdk/platform-tools/adb" install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+### Working version set (do not bump casually)
+| component | version | why |
+|---|---|---|
+| AGP | 8.13.2 | max compileSdk for AGP 8.x is **36** |
+| Gradle | 8.13 | required by AGP 8.13 |
+| Kotlin (+ compose plugin) | 2.3.21 | compose plugin version tracks Kotlin since 2.0 |
+| compileSdk / targetSdk | 36 | matches the installed `android-36.1` platform |
+| core-ktx / activity-compose / lifecycle | 1.17.0 / 1.11.0 / 2.9.4 | newer releases **require compileSdk 37 + AGP 9.1** |
+| compose-bom | 2025.09.01 | same API-37 constraint |
+
+Moving to the newest androidx means AGP 9.x, compileSdk 37 and an extra SDK platform
+download. Not needed for this app.
 
 On the phone: Settings → About → tap **Build number** ×7 → Developer options → **USB debugging**.
 
