@@ -378,6 +378,17 @@ One table, both pipelines write to it. Draft columns:
 - `lat`, `lon`, `verified_taxon`
 Store as SQLite (single file, zero-admin).
 
+**A third model's opinion is not ground truth.** `external_claims` holds species claims
+made by other classifiers (Merlin Sound ID, the BirdNET Live app) — separate from
+`session_ground_truth`, which holds what a **person** claims to have observed. The
+distinction is not bookkeeping: session ground truth is what *proves a false negative*,
+so admitting another model's output would let a Merlin false positive manufacture a
+phantom Perch false negative — a machine error laundered into evidence. `external_claims`
+carries the detector that made each claim, is never read by threshold or false-negative
+analysis, and deliberately has **no score column**: these tools emit a species list, not
+calibrated per-window scores, and inventing a confidence for them would be exactly the
+false comparability §4 forbids.
+
 **Ground truth has two levels, and they must not be conflated.** `results.verified_status`
 is a **row-level** judgement ("this detection is correct"), produced by `biomon/verify.py`.
 `session_ground_truth` is a **session-level** presence claim ("this species was at this site"),
@@ -385,6 +396,23 @@ which an observer can assert without being able to vouch for any particular wind
 ground truth can therefore prove a **false negative** (species known present, never detected)
 and constrain thresholds — but it must **never** be used to set `verified_status`, nor as
 row-level labels for calibration or training. Absence from it is non-observation, not absence.
+
+**Species lists come from an authority, not from memory.** The Danish bird filter is
+DOF's official checklist (Appendix 1, Categories A/B/C) intersected with Perch's
+classes — not a hand-written seed. The seed failed in the least visible way possible:
+it simply never contained *Tringa glareola* (Wood Sandpiper), a regular Danish passage
+migrant, so Perch **could never report it** and nothing in any output hinted at the
+absence. Two rules follow:
+
+- **A missing class is worse than a false positive.** A false positive is visible and
+  can be thresholded away; a missing class is silent forever. Rebuild from the
+  authority when the checklist or the model changes.
+- **Watch for taxonomy splits when rebuilding.** DOF follows AviList, Perch follows
+  iNaturalist. AviList ranks Hooded Crow as a *subspecies* (*Corvus corone cornix*)
+  where Perch has *Corvus cornix* as a species — a naive binomial intersection would
+  have silently deleted the commonest crow in Denmark. `build_lists.py` expands
+  abbreviated subspecies and re-tests them, and **reports anything dropped** so a
+  regression cannot pass unnoticed.
 
 **Thresholds live in the DATA, not the code.** `results` stores every detection above a
 low **ingest floor** (a storage-retention decision, currently logit ≥ 5.0) with its **raw**
