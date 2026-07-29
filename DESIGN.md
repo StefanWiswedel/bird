@@ -485,11 +485,95 @@ protocol on it. The fix is more sessions, not more statistics.
 - Public bird data (BirdSet/BEANS) to ground-truth the Perch bird path.
 
 ## 6. Capture contract (still partly open — blocks the native app)
-- [ ] **fps knee test** — stills vs video? (run ffmpeg -vf fps=N decimation on existing clip; find where visits disappear)
+- [x] **fps knee test — ANSWERED 2026-07-29 (§6b). Recommendation: 3 fps interval stills.**
 - [ ] capture rate + **segmenting** (fixes the 4.6GB / ~38-min single-file cutoff)
 - [ ] **detect on-device vs ship raw** — current lean: keep raw around detections so new models can re-run on old captures; on-device detect only to decide what to keep
 - [ ] focus/exposure lock behaviour
 - App is capture-and-plumbing; the classifier is a swappable file. App can be built against a placeholder model.
+
+### 6b. fps knee test — answered from the corpus, not from spliced footage (2026-07-29)
+
+**Why it stopped being a data-quality question.** The phone hit thermal cutoff after
+~30 min recording video in direct sun. Continuous H.264 encoding is the dominant
+thermal load, so interval stills may be what makes hot-day recording possible at all.
+The cost is already on disk: `data/290726_2/VID_20260729_155533.mp4` is **4.5 GB of
+`mdat` with no `moov` box** — the camera was killed before it could write the index,
+so the entire recording is currently unplayable.
+
+**Method changed deliberately.** The plan in §6 was `ffmpeg -vf fps=N` decimation of an
+existing clip. That would splice discontinuous frames into one stream and **break the
+rolling-median background model at every join**, generating detections from the joins
+themselves. Instead this is answered analytically from residence times already in the
+corpus: for a capture clock of rate *r* with uniform random phase, the number of
+captures landing inside a presence interval of length *L* is `floor(Lr)` or
+`floor(Lr)+1`, the latter with probability `frac(Lr)` — exact, no Monte Carlo.
+`tools/fps_knee.py`.
+
+**Two censoring facts constrain every number.** Both are properties of how the corpus
+was made, and no amount of analysis removes them:
+1. The tracker only ever emits visits of **≥3 detections AND ≥0.8 s**
+   (`video_pipeline.py`). **The corpus therefore contains no short visits at all** —
+   not because they did not happen, but because they were discarded before anything was
+   written down. Every catch rate below is conditioned on visits that already survived
+   that filter, and is therefore an **optimistic bound**.
+2. Frames are processed every `STEP=5`th, so the finest resolution in the data is
+   **~6 fps, not the camera's 30**. 10 fps cannot be validated here, only extrapolated.
+
+**1. Residence time**, 59 confirmed visits, 6 sessions (s):
+
+| min | Q1 | median | Q3 | max | mean |
+|---|---|---|---|---|---|
+| 0.80 | 1.75 | **3.20** | 14.95 | 71.0 | 9.20 |
+
+Bimodal: 39/59 (66 %) are brief 0.8–5 s touchdowns, 15/59 (25 %) are long 15–71 s
+settlings. The min is the filter floor, not biology.
+
+**2. Single-frame visits: none — by construction.** Fewest detections in any confirmed
+visit is **4**; only 1 visit (1.7 %) has ≤4. The ≥3-detection filter makes it
+impossible for a single-frame visit to appear. **Their true frequency is unknown and
+this corpus cannot estimate it.** That is the single largest uncertainty in the
+recommendation.
+
+**3. Residence is an underestimate — mainly through SPLITTING, not gaps.** Within
+tracks, detection is near-continuous (distinct frames / frames spanned: median 0.99,
+Q1 0.96; 76 % of visits detected on essentially every pass). But within-track gaps
+*cannot* exceed the linker's `DT=0.6 s`, so an insect that settles longer does not
+produce a gappy track — it **ends one track and starts another**. Three such groups
+cover **9/59 visits (15 %)**, with **105 s of presence inside a span but not counted as
+residence** (e.g. 4 tracks summing 11.4 s across a 51.9 s span). So true presence is
+longer than measured, and the catch rates below are **conservative**.
+
+**4. Simulated interval capture** (phase-averaged, exact):
+
+| rate | interval | caught ≥1× | caught ≥3× | linker still works? |
+|---|---|---|---|---|
+| 1 fps | 1000 ms | 99.0 % | 59.7 % | **no** — 1.0 s > `DT` 0.6 s, tracks never link |
+| 2 fps | 500 ms | 100 % | 83.6 % | yes |
+| **3 fps** | **333 ms** | **100 %** | **96.9 %** | **yes** |
+| 5 fps | 200 ms | 100 % | 100 % | yes |
+| 10 fps | 100 ms | 100 % | 100 % | yes (extrapolated) |
+
+**RECOMMENDATION: 3 fps.** It catches **100 %** of confirmed visits at least once and
+**96.9 %** at least three times — enough to crop and vote a classification — while its
+333 ms spacing stays inside the existing `DT = 0.6 s` link radius, so the tracker needs
+no retuning to form tracks at all. 1 fps is not merely worse, it is **structurally
+broken**: at 1.0 s spacing no two captures ever link, so every capture becomes its own
+one-blob track and the `n≥3` filter discards all of them.
+
+**What it costs.**
+- Against 5 fps: **3.1 %** of visits drop below 3 captures (fewer crops to vote over,
+  not a missed detection).
+- Against continuous video: **0 %** of the visits we have ever recorded — but the
+  corpus cannot see visits shorter than 0.8 s, so the real cost is **unknown** and
+  falls entirely on brief touchdowns. This is the honest limit of the answer.
+- **The candidate filter must be retuned.** At 3 fps a 0.8 s visit yields ~3 captures
+  spanning 0.67 s, which fails the current `dur ≥ 0.8 s` test. `n≥3` survives;
+  `dur≥0.8` does not and must drop to roughly `2/rate`.
+
+**Not measured: the thermal saving itself.** The mechanism is sound — interval JPEG
+stills skip inter-frame motion estimation entirely, which is the expensive part of
+H.264, and encode ~10× fewer frames — but no thermal measurement has been taken, and
+this recommendation rests on catch rates, not on watts.
 
 ## 7. Hardware (context, not code)
 - Printed A4 tray + post + phone platform; square-post/socket + side thumbscrew coupling; north-side orientation for shadow; locked manual focus. (Frame essentially designed; printing pending.)
@@ -501,6 +585,7 @@ protocol on it. The fix is more sessions, not more statistics.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-07-29) **fps knee test answered — 3 fps interval stills recommended** (§6b). Became urgent for a thermal reason, not a data one: the phone hit thermal cutoff after ~30 min in direct sun, leaving `290726_2` as **4.5 GB of `mdat` with no `moov` box — an unplayable recording**. Answered analytically from residence times rather than by `ffmpeg` decimation, because splicing discontinuous frames would break the rolling-median background at every join and manufacture detections. Residence over 59 confirmed visits: median **3.20 s**, Q1 1.75, Q3 14.95, max 71. At 3 fps, **100 %** of confirmed visits are caught ≥1× and **96.9 %** ≥3×, and 333 ms stays inside the linker's `DT=0.6 s`. **1 fps is structurally broken** — at 1.0 s no two captures ever link, so every capture becomes a one-blob track and the `n≥3` filter discards all of them. Two censoring facts bound the answer: the tracker only ever emitted visits of **≥3 detections and ≥0.8 s**, so the corpus contains **no short visits at all** and their true frequency is unknown; and frames are processed every 5th, so ~6 fps is the finest resolution available and 10 fps is extrapolation. Residence is an **underestimate**, mainly because a settled insect ends one track and starts another (15 % of visits are in such groups, 105 s of presence uncounted) — so the catch rates are conservative. The `dur≥0.8 s` filter must drop to ~`2/rate` for interval capture. **Thermal saving itself is not measured.**
 - (2026-07-29, **corpus-wide discontinuity — §2b**) **Danish bird list rebuilt from DOF's official checklist: 161 → 506 classes.** The seed list failed in the least visible way a filter can — it simply never contained *Tringa glareola* (Wood Sandpiper), a regular Danish passage migrant, so Perch **could never report it** and no output ever hinted at the absence. Source is now "The Danish List", Danish Rarities Committee, Sept 2025 (AviList taxonomy), Appendix 1 (Categories A/B/C) ∩ Perch classes; D/E/F escapes excluded. **ADDED 345, DROPPED 0.** A naive binomial intersection would have deleted *Corvus cornix* (Hooded Crow) — AviList ranks it a subspecies, Perch a species — so the builder expands abbreviated subspecies and reports anything dropped. Only 3 plausible Danish species have no Perch class (*Chlamydotis macqueenii*, *Grus virgo*, *Setophaga aestiva*), all extreme vagrants. **All 7 Perch audio sessions re-run**; any comparison spanning 2026-07-29 must use the new values.
   - Effect on the existing corpus, measured (`tools/list_rebuild_report.py`): **rows 73,461 → 104,669** (+43 %, almost all between the 5.0 ingest floor and threshold), and at threshold **exactly ONE species newly reportable — *Emberiza hortulana* (Ortolan Bunting), 210726_0, 2 windows, max 11.92**, which the safety valve had already been flagging as an out-of-list high scorer. **Nothing lost.**
   - The other 5 newly-passing species in `290726_1` are **not** the rebuild — they were already in the old filter and appear because the Merlin recording was added to that session. Reported separately rather than folded into the rebuild's credit. Four of them (*Chroicocephalus ridibundus* Black-headed Gull, *Corvus cornix* Hooded Crow, *Sterna paradisaea* Arctic Tern, *Branta canadensis* Canada Goose) are also on Merlin's own list — independent corroboration on the same audio.
