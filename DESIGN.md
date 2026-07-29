@@ -284,16 +284,39 @@ the intensity signal a grey shadow on white paper carries), and homomorphic σ25
 loses the single mount6 insect. Either would have looked like a success on blob
 count alone.
 
-**Recommendation: MOG2 with `detectShadows=True`, shadow pixels vetoed from the
-foreground mask.** It is the only variant that holds baseline recall *and* removes
-the false positive, at **+7 % detection time** — every homomorphic variant costs
-1.5–4× for no gain.
+**Best variant, if one is ever adopted: MOG2 with `detectShadows=True`**, shadow
+pixels vetoed from the foreground mask — the only variant that holds baseline recall
+*and* removes the false positive, at **+7 % detection time**, where every homomorphic
+variant costs 1.5–4× for no gain.
 
-**Honesty about the size of the win: it is one false positive.** Precision
-0.923 → 1.000 is a single event on 4.5 minutes of video, and the 322 candidate tracks
-(vs 127) mean more classifier work downstream than the detect timing shows. This is
-a promising result, not a proven one. **Nothing in the pipeline was changed.** Before
-adopting, re-run over the full `mount2`/`mount5`/`mount6` captures.
+### CORRECTED ASSUMPTION — shadow costs compute, not accuracy (decided 2026-07-29)
+
+**The assumption that started this track was wrong, and it is retired here.**
+
+> ~~"Shadow sensitivity forces shooting only in open shade or overcast, which
+> contradicts §0's claim that everyday conditions are the target case."~~
+
+The measurement does not support it. **Baseline emits ONE false insect verdict across
+4.5 minutes of the heaviest moving shadow in the corpus** — out of 27,390 raw blobs.
+The track filters and the classifier were already absorbing the shadow. What shadow
+actually costs is **compute** (blobs, candidate tracks, classifier calls), not
+**accuracy**. Nothing about shooting conditions needs to change, and §0's "noisy,
+shadowed conditions are the target case" was already being met.
+
+**Decision: MOG2 is NOT adopted.** Deprioritised. The win on offer is one false
+positive on 4.5 minutes; that is not evidence at the scale a pipeline change needs,
+and adopting it would spend a permanent complexity and compute cost against a problem
+that is not hurting the output.
+
+**Kept, not deleted:** `tools/shadow_trial.py` (the harness) and
+`tools/shadow_report.py` (the scorer) stay, with the per-clip CSVs, so re-running is
+cheap. **Re-run over the FULL `mount2`/`mount5`/`mount6` captures when convenient, and
+adopt only if the false-positive reduction holds at that scale.** Session `290726_0`
+(same rig, heavy grass shadow throughout, ~1h48m) is the first at-scale opportunity.
+
+**The methodological lesson is the durable output of this track.** Blob count was the
+metric the premise was built on, and it is close to decoupled from what reaches the
+report — the *best* variant tripled it. Optimise the number that reaches the report.
 
 ## 4. Results schema (the unification point)
 One table, both pipelines write to it. Draft columns:
@@ -399,7 +422,8 @@ protocol on it. The fix is more sessions, not more statistics.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
-- (2026-07-29) **Moving-shadow trial: MOG2 recommended, and the premise partly refuted** (§3c). Seven variants over a verbatim pipeline copy, 10 clips. **Baseline already emits only 1 false insect verdict across 4.5 min of heavy moving shadow** despite 27,390 raw blobs — the track filters and classifier absorb shadow already, so it costs compute, not precision, and "shadow forces shooting only in open shade" is not supported end-to-end. **Blob count is a misleading metric**: the best variant (MOG2 `detectShadows`) *triples* it, because vetoing shadow pixels fragments oversized blobs back into the accepted area range. Recall killed the cheap wins — chromaticity (−67 % blobs) loses 2 bees and its premise is broken on a white board; homomorphic σ25 (−18 %) loses the mount6 insect. **Recommended: MOG2 shadow veto** — holds baseline recall 11/13, removes the FP, +7 % detect time, where every homomorphic variant costs 1.5–4× for nothing. Caveat stated: the gain is **one** false positive; promising, not proven. **Nothing changed in the pipeline.**
+- (2026-07-29, **corrected assumption**) **Shadow costs compute, not accuracy — MOG2 NOT adopted, track deprioritised** (§3c). The premise that opened Track A ("shadow sensitivity forces shooting only in open shade or overcast") is **retired**: baseline emits **one** false insect verdict across 4.5 min of the heaviest moving shadow in the corpus, from 27,390 raw blobs. The filters and classifier were already absorbing it, and §0's "shadowed conditions are the target case" was already being met. A one-FP win on 4.5 min is not evidence at the scale a pipeline change needs, and adopting MOG2 would spend permanent complexity and compute against a problem that is not hurting the output. Harness (`tools/shadow_trial.py`) and scorer (`tools/shadow_report.py`) kept; re-run over the FULL mount captures when convenient and adopt only if the reduction holds at scale. Durable lesson: **blob count is close to decoupled from what reaches the report** — the best variant *tripled* it.
+- (2026-07-29) **Moving-shadow trial: MOG2 measured best, premise refuted** (§3c) — *superseded by the corrected-assumption entry above; recommendation withdrawn, findings stand.* Seven variants over a verbatim pipeline copy, 10 clips. **Baseline already emits only 1 false insect verdict across 4.5 min of heavy moving shadow** despite 27,390 raw blobs — the track filters and classifier absorb shadow already, so it costs compute, not precision, and "shadow forces shooting only in open shade" is not supported end-to-end. **Blob count is a misleading metric**: the best variant (MOG2 `detectShadows`) *triples* it, because vetoing shadow pixels fragments oversized blobs back into the accepted area range. Recall killed the cheap wins — chromaticity (−67 % blobs) loses 2 bees and its premise is broken on a white board; homomorphic σ25 (−18 %) loses the mount6 insect. **Recommended: MOG2 shadow veto** — holds baseline recall 11/13, removes the FP, +7 % detect time, where every homomorphic variant costs 1.5–4× for nothing. Caveat stated: the gain is **one** false positive; promising, not proven. **Nothing changed in the pipeline.**
 - (2026-07-29) **Live display passes where archive fails — §10f re-opened as §10g.** On a *targeted* set (the 41 non-leaked windows `results.db` actually flagged at ≥ 11) the fp16 embedder + linear head names **the same species as the laptop 95.1 %** of the time and holds it in **top-3 100 %** of the time — against 67 % / 85 % on the uniformly-sampled set §10f measured. **The first pass was worthless because uniform sampling of a mostly-quiet corpus put exactly ONE real detection in 400 windows**; every "case that matters" number rested on n = 1. Sampling uniformly to evaluate a detector measures the silence. Both things now hold at once: good enough to *show* a candidate, nowhere near good enough to *record* one (moves *Chorthippus brunneus* / Field Grasshopper by up to 2.10 logits against a 0.16 confirmed/rejected gap). Live operating point ≈ 9.0 (below the archive threshold, deliberately). Architecture noted: live scores **never** enter `results.db`, inference runs concurrently at a 6.6 % duty cycle rather than between segments, gate it on the new level meter, and memory (627 MB) is the real constraint. Caveat: n = 41, few species, and the head was fitted on this same corpus — 95 % is an **in-domain** number. **Feasible, not decided. Nothing built.**
 - (2026-07-29, bug) **Off-by-one class index in the on-device spike scripts — §10f's species-level numbers retracted.** `<model>/assets/labels.csv` has 14,796 lines against 14,795 model outputs (first line `inat2024_fsd50k`), and the header guard only stripped a literal `label`/`labels`, so every logit was attributed to the species after the one it was labelled with. **Production is unaffected** — `biomon/audio_pipeline.py` reads perch-hoplite's class list and never touches `labels.csv`; nothing in `results.db` changes. §10f's *conclusion* survives (the learning curve measures reproducing a fixed 193-dim slice, which is index-independent), but its *C. brunneus*, top-1 and genus figures are wrong. Corrected measurement in §10g.
 - (2026-07-29) **Weather recorded as a covariate; both correlations come back NOT significant.** New `session_weather` table (§4b) — separate from `sessions` because it is derived and re-fetchable, and it carries its own provenance including the grid point Open-Meteo actually served and the raw hourly rows. Backfilled all 8 sessions from the Open-Meteo archive (free, no key); 7 succeeded, `020825_0` has no coordinates and is stored as `source='missing'` rather than as a null. Means are **duration-weighted over the hours the captures overlap**, not calendar-day means. Results: wind vs score suppression **ρ = −0.80, p = 0.20 (n = 4)** — points the way the three earlier sessions suggested but does not clear significance; temperature vs visit rate **r = +0.18, p = 0.77 (n = 5)**, and temperature spans only 2.2 °C across the entire corpus so there is barely a predictor to correlate against. Cloud cover vs visit rate does clear significance (**r = −0.96, p = 0.009**) but is **confounded with site** (the one clear-sky session is the only meadow session) and cloud is the least trustworthy backfilled field (5–67 pp disagreement with the BirdNET app). **Suggestive, unconfirmed, nothing tuned on it.** The fix is more sessions, not more statistics.
