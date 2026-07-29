@@ -711,7 +711,55 @@ the phone said *Chorthippus brunneus* (Field Grasshopper) where the laptop said
 *Phylloscopus collybita* (Common Chiffchaff) — a cross-group confusion, the exact
 error a live display would show most confidently and most wrongly.
 
-**Status: feasible, not decided. Nothing built.**
+#### BUILT 2026-07-29 — and the architecture changed on measurement
+
+Approved for build as **display-only candidates**. Two things changed from the analysis
+above, both because they were measured rather than assumed:
+
+**1. The full fp16 model is used, not the embedder + linear head.** §10f reported the
+full model at max |Δlogit| = 2.16 and rejected it. **That figure does not reproduce.**
+Re-measured with the corrected class list:
+
+| chain | set | top-1 vs desktop | top-3 | max abs Δ | *C. brunneus* max abs Δ |
+|---|---|---|---|---|---|
+| fp16 embedder + linear head | targeted 41 | 95.1 % | 100 % | 3.30 | 2.10 |
+| **fp16 FULL model** | **targeted 41** | **100 %** | **100 %** | **0.19** | **0.041** |
+| fp16 FULL model | uniform 400 | 99.0 % | 100 % | 0.71 | 0.198 |
+
+The full model is not marginally better, it is *an order of magnitude* better, and it
+needs no fitted head at all — so the in-domain question stops being about the
+classifier and becomes purely about the recording conditions. Latency 204–228 ms/window
+on the laptop; §10f measured 282 ms on the Pixel 9a, i.e. a 25-min segment costs ~84 s.
+
+**2. Inference runs on completed segment FILES, one at a time**, with the interpreter
+created and closed per segment, so its working set never coexists with itself and is
+not held while merely capturing. Stated honestly: with continuous segmented recording
+there is no true idle gap, so analysing segment N does overlap capture of segment N+1.
+What is guaranteed is that inference never touches the live buffer, never blocks the
+reader, and never runs twice at once.
+
+**Containment — a live score cannot become a record.** Output goes to
+`<recording>.live.json`, tagged `score_type: perch_fp16_live`, flagged
+`archival: false` / `never_import: true`, and `biomon/import_recordings.py` **skips
+`*.live.json` explicitly** (tested with an adversarial file that carries `start_iso`
+and `file` and so would otherwise have passed the shape check). Nothing merges it into
+`results.db`.
+
+**The UI copy is the safety mechanism.** The measured failure mode is a *confident
+cross-group error* — *Chorthippus brunneus* (Field Grasshopper) shown as *Phylloscopus
+collybita* (Common Chiffchaff). So the display says "possibly", shows **three**
+candidates rather than one, keeps the score small and unlabelled (it is an
+uncalibrated logit, and any prominence would read as a probability), leads with the
+common name, and carries the in-domain caveat on screen — not only in the README.
+
+**Operating point 9.0**, deliberately below the archive threshold of 11.0: a missed
+candidate teaches nothing, and a shown candidate is checked by the person standing
+there.
+
+**The in-domain caveat is the honest limit.** 100 % top-1 was measured on this corpus,
+these sites, this microphone. It is not a claim about a new place, and the UI says so.
+
+**Status: BUILT, display-only. The archive bar remains unmet and unchallenged.**
 
 ### 10e. Known physical limits (set expectations now)
 - **Built-in phone mics cap at 48 kHz** via `AudioRecord` (24 kHz Nyquist). That is ample for

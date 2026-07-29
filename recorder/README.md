@@ -28,8 +28,52 @@ expose only the default `MIC` source with that processing baked in. Everything e
 - AGC / NS / AEC explicitly disabled on the session, and the disabled set is recorded.
 - **Interruptions logged** — if a call steals the mic, the gap appears in the sidecar rather
   than silently shortening the recording.
+- **WAV or FLAC** — both lossless. FLAC is roughly a third the size on field audio and
+  is verified end-to-end (ffmpeg, libsndfile and librosa all read it). If the encoder
+  ever refuses, recording falls back to WAV mid-segment and the sidecar says so.
+- **Live input level meter** with peak hold and a "no signal" warning — measured from
+  the same PCM that goes to the file, so it is evidence about the recording itself.
 - Recording list with playback, per-recording **observer note**, share-sheet export
   (audio + sidecar together).
+
+## Live species candidates (optional, display only)
+
+The app can suggest what it might have heard, on-device, with no network. **These are
+candidates to check, never records.**
+
+**Read this before trusting a name.** Fidelity was measured against the desktop
+pipeline on recordings from **the same places, the same phone and the same microphone
+this app was developed with**. On that in-domain set the phone reproduced the laptop's
+top choice 100 % of the time. That number will not survive a change of scene: **expect
+it to do worse somewhere new**, and treat every suggestion as a prompt to look and
+listen rather than as an answer. The known failure mode is a *confident* cross-group
+mistake — a grasshopper offered as a warbler — which is exactly the error that looks
+most convincing. That is why the UI shows three possibilities and not one.
+
+- Runs on **completed segments**, never on the live audio stream, never more than one
+  at a time. Recording is never made to wait for it.
+- Results go to `<recording>.live.json`, tagged `score_type: perch_fp16_live` and
+  flagged `archival: false`. `biomon/import_recordings.py` **skips these files
+  explicitly** — a live score must never land in `results.db` beside a full-precision
+  Perch logit (DESIGN §4, §10g).
+- Off by default; it costs battery and memory.
+
+### Installing the model (once)
+
+The 195 MB model is **not** in the APK — it is a swappable file, so the download stays
+small and the feature stays optional. Without it the app simply does not offer live ID.
+
+```bash
+adb shell mkdir -p /sdcard/Android/data/dk.biomon.recorder/files/models
+adb push perch_builtin_fp16.tflite /sdcard/Android/data/dk.biomon.recorder/files/models/perch_fp16.tflite
+```
+
+Regenerate the species asset (indices must come from perch-hoplite, never from the
+model's `labels.csv` — see the §10f correction) with:
+
+```bash
+cd analysis && .venv-perch/Scripts/python tools/build_live_assets.py
+```
 
 ## Layout
 
@@ -42,11 +86,20 @@ recorder/
         ├── AndroidManifest.xml
         ├── res/{values,xml}/
         └── java/dk/biomon/recorder/
-            ├── AudioEngine.kt      # source selection, effect disabling, WAV writer
-            ├── RecorderService.kt  # foreground service, segments, interruption logging
+            ├── AudioEngine.kt      # source selection, effect disabling, AudioSink, WAV writer
+            ├── FlacWriter.kt       # lossless FLAC container (hand-built, device-verified)
+            ├── RecorderService.kt  # foreground service, segments, level meter, interruptions
             ├── Sidecar.kt          # metadata JSON (the pipeline contract)
             ├── Recordings.kt       # list / share / delete / free space
-            └── MainActivity.kt     # Compose UI
+            ├── Theme.kt            # MD3 tonal palettes + sunlight contrast
+            ├── MainActivity.kt     # Compose UI
+            └── live/               # optional on-device candidates (display only)
+                ├── AudioDecode.kt  # WAV/FLAC decode, 48->32 kHz resample, framing
+                ├── LiveSpecies.kt  # Danish subset + model output indices (asset)
+                ├── LiveId.kt       # fp16 Perch, one segment at a time
+                ├── LiveAnalyzer.kt # queue of completed segments
+                ├── LiveResults.kt  # .live.json, explicitly non-archival
+                └── LiveUi.kt       # the doubt-inviting card
 ```
 
 ## Build & install
