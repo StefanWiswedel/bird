@@ -277,6 +277,43 @@ as a BirdNET confidence, so the column would *look* comparable while meaning dif
 things — worse than an obviously different number. Anything needing comparison converts
 explicitly at query time, and per-species thresholds are set per `score_type`.
 
+### 4b. Weather is a covariate, stored separately from the session record
+Visit rate is the binding constraint on the video module (§2c), and it is governed by
+weather, site and season rather than by anything in the code. Weather is therefore recorded
+per session in a **separate `session_weather` table**, not as columns on `sessions`:
+
+- `sessions` mirrors the hand-authored `data/<id>/session.json` — identity and configuration.
+- `session_weather` is **derived and re-fetchable**, so it carries its own provenance
+  (`source`, `fetched`, the grid point Open-Meteo actually served, and the raw hourly rows the
+  means were reduced from). A re-fetch is one upsert and cannot corrupt the session record.
+- "We looked and there is no data" is stored explicitly (`source='missing'` plus a note),
+  never as a null that is indistinguishable from "never asked".
+
+Values are **duration-weighted means over the hours the captures actually overlap**, not
+calendar-day means: a session running 16:05–18:16 weights hours 16/17/18 by the seconds
+recorded in each. Source is the Open-Meteo archive API (free, no key, no attribution burden).
+
+**What the backfill shows, and what it does not.** All 8 sessions backfilled; 7 succeeded,
+1 (`020825_0`) has no coordinates and is recorded as missing. Two correlations were then run:
+
+| question | n | best coefficient | verdict |
+|---|---|---|---|
+| wind speed vs Perch score suppression | 4 | Spearman ρ = −0.80 (p = 0.20) | **not significant** |
+| temperature vs insect visit rate | 5 | Pearson r = +0.18 (p = 0.77) | **not significant** |
+| cloud cover vs insect visit rate | 5 | Pearson r = −0.96 (p = 0.009) | significant **and confounded** |
+
+The wind result points the way the earlier three sessions suggested, but at n = 4 a single
+session flips the sign and |r| would have to exceed 0.95 to clear p < 0.05. Temperature spans
+only 2.2 °C across the whole corpus — there is essentially no signal to correlate against.
+The one coefficient that does clear significance is **confounded with site**: the only
+clear-sky session is also the only Kalvebod Fælled meadow session, every overcast one is the
+home garden. Cloud cover is also the least trustworthy backfilled field (disagrees with the
+BirdNET-app figure by 5–67 pp; the observer logged one session as "sunny" where Open-Meteo
+says 73 %).
+
+**All of this is SUGGESTIVE and UNCONFIRMED.** Do not tune a threshold, a detector or a field
+protocol on it. The fix is more sessions, not more statistics.
+
 ## 5. Datasets
 - **AMI dataset** — ⚠️ **premise corrected 2026-07-28 after verification. AMI is a MOTH dataset, not a general insect dataset.** Verified facts:
   - **AMI-GBIF** ≈2.5M images = **5,364 moth species** / 1,734 genera / 77 families, from citizen-science + museum photography (varied angles/backgrounds — **not** top-down board crops, so the "framing matches our geometry" claim was wrong).
@@ -305,6 +342,7 @@ explicitly at query time, and per-species thresholds are set per `score_type`.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-07-29) **Weather recorded as a covariate; both correlations come back NOT significant.** New `session_weather` table (§4b) — separate from `sessions` because it is derived and re-fetchable, and it carries its own provenance including the grid point Open-Meteo actually served and the raw hourly rows. Backfilled all 8 sessions from the Open-Meteo archive (free, no key); 7 succeeded, `020825_0` has no coordinates and is stored as `source='missing'` rather than as a null. Means are **duration-weighted over the hours the captures overlap**, not calendar-day means. Results: wind vs score suppression **ρ = −0.80, p = 0.20 (n = 4)** — points the way the three earlier sessions suggested but does not clear significance; temperature vs visit rate **r = +0.18, p = 0.77 (n = 5)**, and temperature spans only 2.2 °C across the entire corpus so there is barely a predictor to correlate against. Cloud cover vs visit rate does clear significance (**r = −0.96, p = 0.009**) but is **confounded with site** (the one clear-sky session is the only meadow session) and cloud is the least trustworthy backfilled field (5–67 pp disagreement with the BirdNET app). **Suggestive, unconfirmed, nothing tuned on it.** The fix is more sessions, not more statistics.
 - (init) Doc created. Decisions: Perch-only, two-pipelines-one-spine, SQLite results, AMI for video, InsectSet459 for audio Orthoptera.
 - (inventory) Appended "Current State (as built)" + "Migration Plan" from a read-only pass over the existing `analysis/` scripts. No code changed.
 - (amend 1) Bird classifier: use Perch 2.0's built-in head directly + Danish-list output filter + per-species threshold tuning on own recordings — NO linear probe. BirdNET comparison downgraded to a sanity check, not a gate. Orthoptera: test head coverage before building. Updated §3 + Phase 3 steps 12–13.
