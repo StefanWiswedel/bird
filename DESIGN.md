@@ -5,6 +5,34 @@
 
 ---
 
+## 0. Purpose
+
+**Mission:** Make the invisible biodiversity around us visible, by creating tools that let
+anyone discover, understand, and protect the wildlife in their everyday environment.
+
+**Product:** A personal biodiversity companion that helps people discover and document the
+living world around them.
+
+### Implications to weigh in EVERY design decision
+- **"Anyone" means no laptop, no code, no lab kit. The phone is the product.** A capability
+  that only works on a developer's laptop is a prototype, not the product.
+- **"Everyday environment" means balconies, parks and gardens — not reserves.** Noisy,
+  shadowed, suboptimal conditions are the **target case, not the degraded one**. A pipeline
+  that needs overcast light or a quiet reserve has not solved the problem; it has avoided it.
+- **"Discover and understand" means in-the-moment feedback beats archival precision.** A
+  candidate ID the user can confirm with their own eyes *now* is worth more than a calibrated
+  logit next week.
+- **"Document" means the record must still be trustworthy** — hence verification, and hence
+  **live and archive scores must never be conflated** (§4 `score_type`).
+
+### How §0 changes earlier judgements
+Several decisions were taken against an archival standard and should be re-read in this light:
+- Shadow sensitivity is not a capture-technique problem to be worked around by shooting only
+  in open shade — that contradicts "everyday environment". It is a **software problem**.
+- On-device inference was rejected in §10f against the *archive* bar (0.16-logit decision
+  gap). Under §0 a **live-display** path has a different and much looser tolerance. The
+  rejection stands for archive scores; it does not automatically settle live display.
+
 ## 1. What this is
 A personal-first (maybe-later-product) biodiversity monitoring platform. One phone, minimal printed hardware, runs on other people's phones eventually. Two sensing modes sharing one framework:
 - **Video** — insect board: fixed top-down camera over an A4 board, detect + crop + classify landings.
