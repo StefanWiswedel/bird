@@ -318,6 +318,57 @@ adopt only if the false-positive reduction holds at that scale.** Session `29072
 metric the premise was built on, and it is close to decoupled from what reaches the
 report — the *best* variant tripled it. Optimise the number that reaches the report.
 
+## 3d. Three-way cross-check — session `290726` jetty (findings only, nothing changed)
+
+The first outing with **three independent identifiers on the same birds at the same
+time**: the observer, Merlin Sound ID, and Perch — the latter on two capture paths at
+once (`290726_0` video audio, AAC-truncated at 17 kHz, 1 h 48 m; `290726_1` BirdNET
+Live FLAC, full band, 24 min).
+
+**Observer claims, all corroborated but one.** Swallows → *Hirundo rustica* (Barn
+Swallow), 649 windows, max 14.67. Wagtails ("black and white") → *Motacilla alba*
+(White Wagtail), 24. Tern → *Sterna hirundo* (Common Tern) 8 **and** *Sterna
+paradisaea* (Arctic Tern) 2 — the ambiguity I flagged when recording the claim was
+real, and Merlin says Arctic. Large heron → *Ardea cinerea* (Grey Heron), 2, max 13.5.
+Gulls → *Chroicocephalus ridibundus* (Black-headed Gull) 4, *Larus canus* (Common
+Gull) 1. **Not found: *Phalacrocorax carbo* (Great Cormorant)**, which the observer was
+certain of — cormorants are near-silent away from colonies, so this is an expected
+false negative of an *audio* method, not a failure of the model. The "one large gull"
+(*Larus marinus*, Great Black-backed Gull) was also not detected.
+
+**Merlin agreed on 8 of its 12.** Both found Barn Swallow, both wagtails, Hooded Crow,
+European Goldfinch, Black-headed Gull, Arctic Tern, Grey Heron and Rook. Merlin alone
+reported *Branta canadensis* (Canada Goose), *Himantopus himantopus* (Black-winged
+Stilt), *Tringa glareola* (Wood Sandpiper). Perch alone reported ten more, including
+*Carduelis carduelis* (European Goldfinch) at 89 windows.
+
+**⚠️ This surfaced a real gap in the Danish species list.** *Tringa glareola* (Wood
+Sandpiper) and *Himantopus himantopus* (Black-winged Stilt) **are in Perch's classes
+but not in `denmark_birds.json`** — while three other *Tringa* species are. Wood
+Sandpiper is a regular Danish passage migrant; its absence means Perch **can never
+report it**, which is precisely the failure §4 forbids ("never drop a class — raise its
+threshold"). It was never dropped, it was never added. Two consequences:
+
+- The list needs regenerating against a proper Danish checklist, and rarities belong
+  **in** it with a high threshold, not absent from it.
+- **This is not a free fix.** `audio_pipeline.py` only *stores* rows whose class is in
+  the list; out-of-list classes are reported by the safety valve as a max score and
+  then discarded. So adding a species requires **re-running Perch** on affected
+  sessions — unlike a threshold change, which is an `UPDATE`.
+
+**The safety valve did its job again**, flagging high-scoring out-of-list classes that
+are geography traps rather than gaps: *Corvus brachyrhynchos* (American Crow) 11.2,
+*Agelaius phoeniceus* (Red-winged Blackbird) 10.7, *Bubo virginianus* (Great Horned
+Owl) 10.4 — all North American. Alongside them the FSD50k non-bird classes behaved
+sensibly for a jetty with people: `Liquid` 10.8, `Human_voice` 10.2, `Shout` 10.2.
+
+**Capture-path note.** The two paths were recorded simultaneously, so their counts are
+**not independent samples** and must never be pooled as such (§2b). Per-minute rates
+are comparable: Barn Swallow 6.0/min on the video path vs 2.7/min on the FLAC, which
+is the wrong direction for the 17 kHz truncation hypothesis and most likely reflects
+mic placement and the shorter window rather than bandwidth. **Not a controlled
+comparison; nothing concluded from it.**
+
 ## 4. Results schema (the unification point)
 One table, both pipelines write to it. Draft columns:
 - `id`, `session_id`, `module` (e.g. insect_board | birds | orthoptera), `timestamp`
@@ -422,6 +473,9 @@ protocol on it. The fix is more sessions, not more statistics.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-07-29) **Live species candidates BUILT and device-verified** (§10g). fp16 FULL Perch, display only, operating point 9.0, top-3, on completed segments. The architecture changed on measurement: §10f's "fp16 = max |Δ| 2.16" **does not reproduce** — the full model scores **top-1 100 % / max |Δ| 0.19** on the targeted set, an order of magnitude better than the embedder+head chain and with no fitted head to go stale. Contained so a live score cannot become a record: `<name>.live.json`, `score_type perch_fp16_live`, `archival:false`, and `import_recordings.py` skips `*.live.json` explicitly (tested adversarially). Memory behaves: **peak 1.30 GB PSS during inference, back to 160 MB within 20 s**; 60 windows in 29.5 s while recording continued. Fixed a shutdown race found only on device (cancel() is cooperative, so the last segment had not yet been submitted when the service asked whether it could stop). The first run demonstrated the caveat unprompted — recorded indoors at a desk, it offered **Tawny Owl at 2 pm**.
+- (2026-07-29) **Three-way cross-check at the jetty** (§3d): observer, Merlin and Perch on the same birds at the same moment. All but one observer claim corroborated; the exception is *Phalacrocorax carbo* (Great Cormorant), near-silent away from colonies — an expected false negative of an audio method. **Found a real list gap**: *Tringa glareola* (Wood Sandpiper) and *Himantopus himantopus* (Black-winged Stilt) are in Perch but missing from `denmark_birds.json`, so they can never be reported. Fixing it requires a **re-run**, not an `UPDATE`, because out-of-list classes are never stored.
+- (2026-07-29) **FLAC verified on hardware — and it was broken.** Two real bugs the unverified code shipped with: the csd-0 container header was assembled wrongly (Android returns a complete metadata-block sequence, not a bare STREAMINFO), producing files no decoder would open; and `total_samples` was left 0, which ffmpeg tolerates but **libsndfile does not** — so files decoded fine in ffmpeg and blew up on ingest through librosa. Both fixed and verified end to end (ffprobe, soundfile, librosa). Vindicates testing before trusting: the audio was always intact, the container was not.
 - (2026-07-29, **corrected assumption**) **Shadow costs compute, not accuracy — MOG2 NOT adopted, track deprioritised** (§3c). The premise that opened Track A ("shadow sensitivity forces shooting only in open shade or overcast") is **retired**: baseline emits **one** false insect verdict across 4.5 min of the heaviest moving shadow in the corpus, from 27,390 raw blobs. The filters and classifier were already absorbing it, and §0's "shadowed conditions are the target case" was already being met. A one-FP win on 4.5 min is not evidence at the scale a pipeline change needs, and adopting MOG2 would spend permanent complexity and compute against a problem that is not hurting the output. Harness (`tools/shadow_trial.py`) and scorer (`tools/shadow_report.py`) kept; re-run over the FULL mount captures when convenient and adopt only if the reduction holds at scale. Durable lesson: **blob count is close to decoupled from what reaches the report** — the best variant *tripled* it.
 - (2026-07-29) **Moving-shadow trial: MOG2 measured best, premise refuted** (§3c) — *superseded by the corrected-assumption entry above; recommendation withdrawn, findings stand.* Seven variants over a verbatim pipeline copy, 10 clips. **Baseline already emits only 1 false insect verdict across 4.5 min of heavy moving shadow** despite 27,390 raw blobs — the track filters and classifier absorb shadow already, so it costs compute, not precision, and "shadow forces shooting only in open shade" is not supported end-to-end. **Blob count is a misleading metric**: the best variant (MOG2 `detectShadows`) *triples* it, because vetoing shadow pixels fragments oversized blobs back into the accepted area range. Recall killed the cheap wins — chromaticity (−67 % blobs) loses 2 bees and its premise is broken on a white board; homomorphic σ25 (−18 %) loses the mount6 insect. **Recommended: MOG2 shadow veto** — holds baseline recall 11/13, removes the FP, +7 % detect time, where every homomorphic variant costs 1.5–4× for nothing. Caveat stated: the gain is **one** false positive; promising, not proven. **Nothing changed in the pipeline.**
 - (2026-07-29) **Live display passes where archive fails — §10f re-opened as §10g.** On a *targeted* set (the 41 non-leaked windows `results.db` actually flagged at ≥ 11) the fp16 embedder + linear head names **the same species as the laptop 95.1 %** of the time and holds it in **top-3 100 %** of the time — against 67 % / 85 % on the uniformly-sampled set §10f measured. **The first pass was worthless because uniform sampling of a mostly-quiet corpus put exactly ONE real detection in 400 windows**; every "case that matters" number rested on n = 1. Sampling uniformly to evaluate a detector measures the silence. Both things now hold at once: good enough to *show* a candidate, nowhere near good enough to *record* one (moves *Chorthippus brunneus* / Field Grasshopper by up to 2.10 logits against a 0.16 confirmed/rejected gap). Live operating point ≈ 9.0 (below the archive threshold, deliberately). Architecture noted: live scores **never** enter `results.db`, inference runs concurrently at a 6.6 % duty cycle rather than between segments, gate it on the new level meter, and memory (627 MB) is the real constraint. Caveat: n = 41, few species, and the head was fitted on this same corpus — 95 % is an **in-domain** number. **Feasible, not decided. Nothing built.**
