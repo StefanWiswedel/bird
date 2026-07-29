@@ -393,6 +393,73 @@ First capture from our own app: home balcony, 20:51–21:23, 5-min segments.
   recording and caches the last good fix, and the sidecar records `location_age_s` so a stale
   fix is visible rather than passed off as current.
 
+### 10f. On-device classification: SETTLED — classification stays on the laptop
+
+Two spikes (2026-07-28). Both measured on the Pixel 9a; nothing built.
+
+**Spike 1 — full Perch to TFLite.** Converts with **builtin ops only** (no Flex).
+fp32 390 MB / fp16 195 MB; **282 ms** per 5 s window at 4 threads (~18x real-time);
+**~1.8 GB peak RAM**. Rejected on fidelity: fp16 gave **max |Δlogit| = 2.16**.
+
+**Spike 2 — embedder-only + small linear head.** The premise was right about the
+shape of the problem: the classification head is `[14795, 1536, 4]` = **90.9 M of
+the model's 101.8 M params (89 %)**, so dropping it shrinks everything:
+
+| | full model | embedder only |
+|---|---|---|
+| fp16 size | 195 MB | **21.9 MB** |
+| int8 size | — | **12.5 MB** |
+| peak RAM (fp16) | 1842 MB | **627 MB** |
+| latency @4 threads | 282 ms | **330 ms** |
+
+Note latency did **not** improve — the head is 90.9 M params but only ~90.9 M MACs
+in a single matmul, which XNNPACK handles almost for free; the convolutional
+embedder dominates compute. The head is a *memory* cost, not a *time* cost.
+
+**Why it still fails — the head cannot be reconstructed.**
+- *(a) Extract Perch's own head rows*: **not feasible.** The head does not consume
+  the 1536-d `embedding`; its `4` axis matches the `spatial_embedding` (16, 4, 1536).
+  No tested reduction (max / mean / sum / logsumexp over either tensor, with or
+  without either bias) reproduced the reference logits. Reverse-engineering the
+  pooling was out of spike budget.
+- *(b) Fit a linear head on the 1536-d embedding*: **fails, and more data will not
+  fix it.** Learning curve on 2,600 real corpus windows:
+
+  | N train | test max abs Δ | test mean abs Δ |
+  |---|---|---|
+  | 200 | 7.76 | 0.351 |
+  | 800 | 4.50 | 0.278 |
+  | 1600 | 4.29 | 0.252 |
+  | 2200 | **3.47** | **0.243** |
+
+  Error is flattening well above tolerance. This is **information-limited, not
+  data-limited**: Perch pools the 16x4x1536 spatial map down to 1536 dims *before*
+  the embedding output, and its head reads the un-pooled map. Information the head
+  needs is gone by the time we see the embedding.
+
+**Full chain vs desktop fp32 Perch, 400 held-out windows:**
+
+| chain | max abs Δ | mean abs Δ | top-1 agree | *C. brunneus* max abs Δ |
+|---|---|---|---|---|
+| fp32 embedder + linear head | 3.469 | 0.243 | 69.8 % | 0.615 |
+| **fp16 embedder + linear head** | **3.478** | 0.243 | 70.0 % | 0.618 |
+| int8 dynamic + linear head | 4.958 | 0.329 | **39.5 %** | 0.922 |
+
+**Verdict: fails the bar by an order of magnitude.** The confirmed/rejected gap for
+*Chorthippus brunneus* (Field Grasshopper) is **0.16 logits**; this chain moves that
+species' logits by up to **0.62** and other species by up to **3.48**, with **top-1
+agreeing only 70 %** of the time. Calibrated int8 did **not** beat fp16 (contrary to
+the usual mobile result) — it was clearly worse, and top-1 collapsed to 39.5 %.
+Quantisation is not the problem; **the linear head is**, which is why fp32 and fp16
+are indistinguishable here.
+
+Also: full-int8 would not run — the benchmark binary rejected it (`SQRT` v2
+unsupported) and the desktop interpreter hit a divide-by-zero in the quantised
+graph. Additional deployment friction on top of a chain that already fails.
+
+**Settled: recording on the phone, classification on the laptop.** Revisit only if
+Google ships a Perch head that consumes the pooled embedding, or a first-party
+mobile Perch.
 ### 10e. Known physical limits (set expectations now)
 - **Built-in phone mics cap at 48 kHz** via `AudioRecord` (24 kHz Nyquist). That is ample for
   birds and Orthoptera (Perch's usable band is 0–16 kHz; stridulation 8–16 kHz), and it will
