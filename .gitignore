@@ -40,3 +40,5 @@ analysis/*.db.*bak
 analysis/*_run.log
 data/**/report.html
 analysis/rerun_*.log
+analysis/*_video2.log
+analysis/*_audio.log

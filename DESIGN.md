@@ -485,8 +485,50 @@ protocol on it. The fix is more sessions, not more statistics.
 - Public bird data (BirdSet/BEANS) to ground-truth the Perch bird path.
 
 ## 6. Capture contract (still partly open — blocks the native app)
-- [x] **fps knee test — ANSWERED 2026-07-29 (§6b). Recommendation: 3 fps interval stills.**
-- [ ] capture rate + **segmenting** (fixes the 4.6GB / ~38-min single-file cutoff)
+
+### CAPTURE RATE: DECIDED — 3 fps interval stills (adopted 2026-07-29)
+
+**The video board is captured as 3 fps interval stills, not continuous video.** This is
+now the capture contract, not a recommendation. Evidence in §6b; the numbers that
+decided it, over 59 confirmed insect visits:
+
+| rate | caught ≥1× | caught ≥3× | tracker still links? |
+|---|---|---|---|
+| 1 fps | 99.0 % | 59.7 % | **no** — 1.0 s > `DT` 0.6 s |
+| 2 fps | 100 % | 83.6 % | yes |
+| **3 fps** | **100 %** | **96.9 %** | **yes** |
+| 5 fps | 100 % | 100 % | yes |
+
+3 fps catches **every** confirmed visit at least once and **96.9 %** at least three
+times — enough to crop and vote a classification — while its 333 ms spacing stays
+inside the existing `DT = 0.6 s` link radius, so tracks still form. Going to 5 fps buys
+the last 3.1 % of three-capture visits; going to 1 fps is not a trade but a **structural
+break**, since at 1.0 s spacing no two captures ever link and every capture becomes a
+one-blob track the `n≥3` filter discards.
+
+**It was adopted for a thermal reason, not a data one.** The phone hit thermal cutoff
+after ~30 min in direct sun and left `290726_2` as 4.5 GB of `mdat` with no index
+(recovered, §6c). Continuous H.264 is the dominant load; interval stills skip
+inter-frame motion estimation entirely and encode ~10× fewer frames.
+
+**TWO CAVEATS, both unresolved, both stated here so they are not forgotten:**
+
+1. **The sub-0.8 s blind spot is UNMEASURED.** The tracker only ever emitted visits of
+   ≥3 detections and ≥0.8 s, so the corpus contains **no short visits at all** — their
+   true frequency is unknown and this corpus cannot estimate it. Every catch rate above
+   is *conditioned* on visits that already lasted 0.8 s. If brief touchdowns are common,
+   3 fps loses them and we will not know it. Closing this needs a deliberate
+   high-rate capture with the persistence filter relaxed, not more analysis.
+2. **The corpus cannot see below ~6 fps.** Frames are processed every `STEP=5`th, so
+   ~5.97 Hz is the finest temporal resolution in the data. The 5 fps row is near that
+   limit and the 10 fps row is **extrapolation, not measurement**. 3 fps sits safely
+   inside the measurable range; nothing above ~6 fps has been validated at all.
+
+**Not measured: the thermal saving itself.** The mechanism is sound but no watt or
+junction-temperature measurement has been taken. The decision rests on catch rates.
+
+- [x] **fps knee test — ANSWERED 2026-07-29 (§6b).**
+- [x] **capture rate — DECIDED: 3 fps interval stills** (above). **Segmenting still open** for the 4.6 GB / ~38-min single-file cutoff; note interval stills change its shape entirely, since there is no single growing file to truncate.
 - [ ] **detect on-device vs ship raw** — current lean: keep raw around detections so new models can re-run on old captures; on-device detect only to decide what to keep
 - [ ] focus/exposure lock behaviour
 - App is capture-and-plumbing; the classifier is a swappable file. App can be built against a placeholder model.
@@ -575,6 +617,49 @@ stills skip inter-frame motion estimation entirely, which is the expensive part 
 H.264, and encode ~10× fewer frames — but no thermal measurement has been taken, and
 this recommendation rests on catch rates, not on watts.
 
+### 6c. Recovering a thermally-killed recording (2026-07-29)
+
+`290726_2` is the first capture lost to heat, and it is worth writing down because the
+failure mode is silent and the recovery has three traps.
+
+**What the cutoff does.** MP4 writes its index (`moov`) *last*. A camera killed
+mid-recording leaves `ftyp` + `free` + `mdat` and nothing else — 4.5 GB of valid H.264
+that no player will open, because there is no sample table. `ffmpeg` cannot help: the
+`mdat` is length-prefixed AVCC, not Annex-B, so it does not parse as an elementary
+stream either.
+
+**Recovery: `untrunc`** (anthwlock build), which rebuilds the index by learning the
+sample structure from a *healthy reference file from the same camera*. Recovered 32,158
+frames / ~19 min / 536 keyframes. Then three traps, in the order they bit:
+
+1. **Guessed timestamps break SEEKING, silently.** `untrunc` warns its frame durations
+   "will probably be wrong"; what it does not say is that the resulting non-monotonic
+   DTS makes OpenCV seek to the *wrong frame*. Verified directly: sequential read vs
+   `CAP_PROP_POS_FRAMES` disagreed on 2 of 3 probes. The classifier crops by seeking, so
+   this would have silently taken crops from the wrong moments. Fixed by re-muxing to
+   constant frame rate from the elementary streams, after which all probes matched.
+2. **The reference's metadata is inherited, including GPS.** The recovered file reported
+   the *reference's* coordinates. The original never had a `moov`, so it never had GPS —
+   those coordinates are the morning jetty's, and using them would place an afternoon
+   session at the wrong site. `lat`/`lon` are left **null** pending the observer.
+3. **Rebuilding from elementary streams DROPS the rotation matrix.** The phone records
+   1920×1080 with `rotation=-90`; without it OpenCV hands back landscape, the portrait
+   crop clips at row 1080, and the paper mask covers **215 k px instead of 369 k — 60 %
+   of the board**. The run completed and looked plausible (104 blobs, 1 insect) while
+   silently monitoring the wrong region. Caught only by comparing mask area against
+   other captures. Restored with `-display_rotation -90` and re-run.
+
+**The lesson is trap 3, not trap 1.** A recovery that fails loudly costs an hour. A
+recovery that succeeds *partially* and produces confident, low numbers is how a corpus
+acquires a session that looks like "few insects here" when it means "we looked at 60 %
+of the board". **Always compare a recovered capture's paper-mask area against a healthy
+one from the same rig before trusting a single detection from it.**
+
+Also: the recovered capture ran at **28.14 fps** against 29.87 for un-throttled
+segments — and the last segment of `290726_0` (also late, also hot) ran at 28.13. The
+camera was already throttling its frame rate before it died, which is a thermal signal
+visible in the metadata of every hot capture.
+
 ## 7. Hardware (context, not code)
 - Printed A4 tray + post + phone platform; square-post/socket + side thumbscrew coupling; north-side orientation for shadow; locked manual focus. (Frame essentially designed; printing pending.)
 
@@ -585,6 +670,10 @@ this recommendation rests on catch rates, not on watts.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-07-29) **Capture rate DECIDED: 3 fps interval stills** (§6). Adopted for a thermal reason, not a data one. Catches **100 %** of 59 confirmed visits ≥1× and **96.9 %** ≥3×, and 333 ms stays inside the tracker's `DT = 0.6 s`. Two caveats carried forward explicitly: the **sub-0.8 s blind spot is unmeasured** (the tracker never emitted a visit shorter than 0.8 s, so their frequency is unknown and closing it needs a deliberate high-rate capture with the filter relaxed), and **the corpus cannot see below ~6 fps** (`STEP=5`), so 10 fps is extrapolation. The thermal saving itself is still unmeasured.
+- (2026-07-29) **Persistence filter now derives from the capture rate** — and the derivation is the point. Measured duration is not presence: a visit of true length *L* sampled at rate *r* spans on average *L − 1/r*, so a fixed `dur ≥ 0.8 s` silently tightens as the rate falls, and at 3 fps would have made the pipeline **discard its own detections**. The rule is now stated once about the animal (`MIN_PRESENCE_S = 0.968`) and both thresholds follow the rate. **Verified identical on continuous footage**: `tools/verify_filter_retune.py` re-links every existing capture's `blobs.csv` and diffs old vs new candidate sets — **3,183 candidates, 17 captures, zero difference**, so §2b is satisfied and no stored result moved.
+- (2026-07-29) **Thermally-killed recording recovered** (§6c). `290726_2` was 4.5 GB of `mdat` with no `moov`; rebuilt with `untrunc` against a same-camera reference (32,158 frames, ~19 min). Three traps, worth remembering in order of nastiness: guessed timestamps made **OpenCV seek to the wrong frames** (so the classifier would have cropped the wrong moments — fixed by re-muxing to CFR); the reference's **GPS is inherited** (so `lat`/`lon` are left null rather than placing an afternoon session at the morning jetty); and rebuilding from elementary streams **drops the rotation matrix**, which clipped the portrait crop and left the paper mask covering **215 k px instead of 369 k — 60 % of the board** while the run completed and looked plausible. That third one is the lesson: a partial recovery that succeeds quietly is how a corpus acquires a session meaning "we looked at 60 % of the board" while reading as "few insects here". **Compare a recovered capture's mask area against a healthy one before trusting it.** Result after the fix: **3 insects, 376 blobs** (vs 1 insect, 104 blobs while broken). Also: the capture ran at **28.14 fps vs 29.87** un-throttled — the camera was throttling before it died, a thermal signal visible in metadata.
+- (2026-07-29) **The hot afternoon was NOT the richest footage.** 3 insects in 19 min = **9.5/h, 95 % CI [2.0, 27.7]** — against 12.8/h [8.1, 19.2] for the same site that morning. With 3 events the interval is far too wide to rank, so the honest statement is that it is **indistinguishable**, not lower. What *is* clear: **376 blobs in 19 min of full sun vs 65,954 in 25 min of moving shadow** — direct corroboration of §3c's finding that shadow costs compute, not accuracy.
 - (2026-07-29) **fps knee test answered — 3 fps interval stills recommended** (§6b). Became urgent for a thermal reason, not a data one: the phone hit thermal cutoff after ~30 min in direct sun, leaving `290726_2` as **4.5 GB of `mdat` with no `moov` box — an unplayable recording**. Answered analytically from residence times rather than by `ffmpeg` decimation, because splicing discontinuous frames would break the rolling-median background at every join and manufacture detections. Residence over 59 confirmed visits: median **3.20 s**, Q1 1.75, Q3 14.95, max 71. At 3 fps, **100 %** of confirmed visits are caught ≥1× and **96.9 %** ≥3×, and 333 ms stays inside the linker's `DT=0.6 s`. **1 fps is structurally broken** — at 1.0 s no two captures ever link, so every capture becomes a one-blob track and the `n≥3` filter discards all of them. Two censoring facts bound the answer: the tracker only ever emitted visits of **≥3 detections and ≥0.8 s**, so the corpus contains **no short visits at all** and their true frequency is unknown; and frames are processed every 5th, so ~6 fps is the finest resolution available and 10 fps is extrapolation. Residence is an **underestimate**, mainly because a settled insect ends one track and starts another (15 % of visits are in such groups, 105 s of presence uncounted) — so the catch rates are conservative. The `dur≥0.8 s` filter must drop to ~`2/rate` for interval capture. **Thermal saving itself is not measured.**
 - (2026-07-29, **corpus-wide discontinuity — §2b**) **Danish bird list rebuilt from DOF's official checklist: 161 → 506 classes.** The seed list failed in the least visible way a filter can — it simply never contained *Tringa glareola* (Wood Sandpiper), a regular Danish passage migrant, so Perch **could never report it** and no output ever hinted at the absence. Source is now "The Danish List", Danish Rarities Committee, Sept 2025 (AviList taxonomy), Appendix 1 (Categories A/B/C) ∩ Perch classes; D/E/F escapes excluded. **ADDED 345, DROPPED 0.** A naive binomial intersection would have deleted *Corvus cornix* (Hooded Crow) — AviList ranks it a subspecies, Perch a species — so the builder expands abbreviated subspecies and reports anything dropped. Only 3 plausible Danish species have no Perch class (*Chlamydotis macqueenii*, *Grus virgo*, *Setophaga aestiva*), all extreme vagrants. **All 7 Perch audio sessions re-run**; any comparison spanning 2026-07-29 must use the new values.
   - Effect on the existing corpus, measured (`tools/list_rebuild_report.py`): **rows 73,461 → 104,669** (+43 %, almost all between the 5.0 ingest floor and threshold), and at threshold **exactly ONE species newly reportable — *Emberiza hortulana* (Ortolan Bunting), 210726_0, 2 windows, max 11.92**, which the safety valve had already been flagging as an out-of-list high scorer. **Nothing lost.**
