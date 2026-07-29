@@ -698,9 +698,12 @@ error a live display would show most confidently and most wrongly.
 - Storage: 48 kHz/16-bit mono ≈ **5.8 MB/min ≈ 346 MB/hour**; a 20-min segment ≈ 115 MB. The UI
   must show free space and estimated remaining recording time.
 
-### 10f. Open decision
-Stack, toolchain, background-survival strategy and repo location — **reported for review before
-any code is written**. Nothing built until the stack choice is approved.
+### 10h. Open decision — RESOLVED
+Stack, toolchain, background-survival strategy and repo location — reported for review before
+any code was written. **Approved 2026-07-28: native Kotlin, for the reason that mattered —
+`AudioSource.UNPROCESSED`.** Built and field-tested since (§10d-bis).
+
+*(Renumbered from a second "10f" that collided with the on-device-classification section.)*
 
 ## Current State (as built)
 
