@@ -37,3 +37,4 @@ desktop.ini
 analysis/*.db.bak
 analysis/*.db.*bak
 *.bak
+analysis/*_run.log
