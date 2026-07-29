@@ -238,6 +238,63 @@ that needs more than one session, and the ground truth above is *session-level* 
 prove a species was missed, but cannot label which window was right, so it constrains
 thresholds without supplying row-level training labels.
 
+## 3c. Moving-shadow trial — session `280726_1` (findings only, nothing changed)
+
+§0 says noisy, shadowed conditions are the **target case, not the degraded one**, so
+moving vegetation shadow was treated as a software problem and measured rather than
+worked around. Seven preprocessing variants, run through a **verbatim copy** of the
+white-mode pipeline (`tools/shadow_trial.py`) with two injection points; the board
+mask always comes from the raw median frame and the classifier always sees raw
+pixels, so nothing but the variant changes. Ten clips, 60–90 s: `mount2` (heavy
+moving shadow, **0 real insects**) as the failure case, `mount5`/`mount6` (13 insects)
+as the recall controls. Scored by `tools/shadow_report.py`.
+
+**The baseline ceiling is 11/13, not 13/13.** All 13 ground-truth insects do fall
+inside the clip windows, but the baseline itself only recovers 11 when run on short
+clips — the rolling background model has far less history than in the full-length run
+the ground truth came from. That is a property of the harness. **Variants are scored
+against baseline, not against 13.**
+
+| variant | mount2 blobs | vs base | cand tracks | insect FP | recall | precision | detect cost |
+|---|---|---|---|---|---|---|---|
+| baseline | 27,390 | — | 127 | 1 | 11/13 | 0.923 | 1.00× |
+| homomorphic σ25 | 22,543 | −18 % | 47 | 0 | **10/13** | 1.000 | 1.48× |
+| homomorphic σ50 | 28,391 | +4 % | 94 | 1 | 11/13 | 0.923 | 2.43× |
+| homomorphic σ100 | 28,023 | +2 % | 128 | 1 | 11/13 | 0.933 | 4.09× |
+| chromaticity R/(R+G+B) | 9,127 | −67 % | 150 | 1 | **9/13** | 0.889 | 1.21× |
+| **MOG2 `detectShadows`** | 86,131 | +214 % | 322 | **0** | **11/13** | **1.000** | **1.07×** |
+| homomorphic σ50 + MOG2 | 71,471 | +161 % | 191 | 0 | 11/13 | 1.000 | 3.71× |
+
+**The premise is weaker than it looked.** Baseline produces **one** false insect
+verdict across 4.5 minutes of heavy moving shadow — from 27,390 raw blobs. The track
+filters and the classifier are already absorbing the shadow; what it costs is
+**compute**, not precision. "Shadow forces shooting only in open shade" is not
+supported by the end-to-end numbers.
+
+**Blob count is a misleading headline, and this trial shows why.** MOG2 has the
+*best* output and **triples** the blob count: vetoing shadow pixels fragments large
+blobs, and fragments of a formerly oversized (>`AMAX`) blob land back inside the
+accepted area range. Blob count and false-positive count are close to decoupled —
+optimise the one that reaches the report.
+
+**Recall is the binding constraint, and it eliminates the cheap wins.** The two
+variants that cut blobs hardest both lose real insects: chromaticity loses two bees
+(its premise is broken on a *white* board — normalising by R+G+B discards exactly
+the intensity signal a grey shadow on white paper carries), and homomorphic σ25
+loses the single mount6 insect. Either would have looked like a success on blob
+count alone.
+
+**Recommendation: MOG2 with `detectShadows=True`, shadow pixels vetoed from the
+foreground mask.** It is the only variant that holds baseline recall *and* removes
+the false positive, at **+7 % detection time** — every homomorphic variant costs
+1.5–4× for no gain.
+
+**Honesty about the size of the win: it is one false positive.** Precision
+0.923 → 1.000 is a single event on 4.5 minutes of video, and the 322 candidate tracks
+(vs 127) mean more classifier work downstream than the detect timing shows. This is
+a promising result, not a proven one. **Nothing in the pipeline was changed.** Before
+adopting, re-run over the full `mount2`/`mount5`/`mount6` captures.
+
 ## 4. Results schema (the unification point)
 One table, both pipelines write to it. Draft columns:
 - `id`, `session_id`, `module` (e.g. insect_board | birds | orthoptera), `timestamp`
@@ -342,6 +399,8 @@ protocol on it. The fix is more sessions, not more statistics.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-07-29) **Moving-shadow trial: MOG2 recommended, and the premise partly refuted** (§3c). Seven variants over a verbatim pipeline copy, 10 clips. **Baseline already emits only 1 false insect verdict across 4.5 min of heavy moving shadow** despite 27,390 raw blobs — the track filters and classifier absorb shadow already, so it costs compute, not precision, and "shadow forces shooting only in open shade" is not supported end-to-end. **Blob count is a misleading metric**: the best variant (MOG2 `detectShadows`) *triples* it, because vetoing shadow pixels fragments oversized blobs back into the accepted area range. Recall killed the cheap wins — chromaticity (−67 % blobs) loses 2 bees and its premise is broken on a white board; homomorphic σ25 (−18 %) loses the mount6 insect. **Recommended: MOG2 shadow veto** — holds baseline recall 11/13, removes the FP, +7 % detect time, where every homomorphic variant costs 1.5–4× for nothing. Caveat stated: the gain is **one** false positive; promising, not proven. **Nothing changed in the pipeline.**
+- (2026-07-29, bug) **Off-by-one class index in the on-device spike scripts — §10f's species-level numbers retracted.** `<model>/assets/labels.csv` has 14,796 lines against 14,795 model outputs (first line `inat2024_fsd50k`), and the header guard only stripped a literal `label`/`labels`, so every logit was attributed to the species after the one it was labelled with. **Production is unaffected** — `biomon/audio_pipeline.py` reads perch-hoplite's class list and never touches `labels.csv`; nothing in `results.db` changes. §10f's *conclusion* survives (the learning curve measures reproducing a fixed 193-dim slice, which is index-independent), but its *C. brunneus*, top-1 and genus figures are wrong. Corrected measurement in §10g.
 - (2026-07-29) **Weather recorded as a covariate; both correlations come back NOT significant.** New `session_weather` table (§4b) — separate from `sessions` because it is derived and re-fetchable, and it carries its own provenance including the grid point Open-Meteo actually served and the raw hourly rows. Backfilled all 8 sessions from the Open-Meteo archive (free, no key); 7 succeeded, `020825_0` has no coordinates and is stored as `source='missing'` rather than as a null. Means are **duration-weighted over the hours the captures overlap**, not calendar-day means. Results: wind vs score suppression **ρ = −0.80, p = 0.20 (n = 4)** — points the way the three earlier sessions suggested but does not clear significance; temperature vs visit rate **r = +0.18, p = 0.77 (n = 5)**, and temperature spans only 2.2 °C across the entire corpus so there is barely a predictor to correlate against. Cloud cover vs visit rate does clear significance (**r = −0.96, p = 0.009**) but is **confounded with site** (the one clear-sky session is the only meadow session) and cloud is the least trustworthy backfilled field (5–67 pp disagreement with the BirdNET app). **Suggestive, unconfirmed, nothing tuned on it.** The fix is more sessions, not more statistics.
 - (init) Doc created. Decisions: Perch-only, two-pipelines-one-spine, SQLite results, AMI for video, InsectSet459 for audio Orthoptera.
 - (inventory) Appended "Current State (as built)" + "Migration Plan" from a read-only pass over the existing `analysis/` scripts. No code changed.
@@ -460,6 +519,26 @@ First capture from our own app: home balcony, 20:51–21:23, 5-min segments.
   fix is visible rather than passed off as current.
 
 ### 10f. On-device classification: SETTLED — classification stays on the laptop
+
+> ⚠️ **CORRECTION (2026-07-29): every species-level number in this section is wrong.**
+> The spike scripts read class names from `<model>/assets/labels.csv`, which holds
+> **14,796** lines against the model's **14,795** outputs — its first line is
+> `inat2024_fsd50k`, a dataset tag, and the header guard only stripped a line
+> literally equal to `label`/`labels`. **Every class index was therefore shifted by
+> one**, and each logit was attributed to the species *after* the one it was
+> labelled with. So the *C. brunneus* column, the top-1 agreement figure and the
+> genus/group figures below all describe the wrong classes.
+>
+> **Scope of the error — production is NOT affected.** `biomon/audio_pipeline.py`
+> takes its class list from perch-hoplite (`model.class_list['labels'].classes`) and
+> never reads `labels.csv`. Nothing in `results.db` is wrong, and no stored detection
+> changes. The bug lived only in the throwaway on-device spike scripts.
+>
+> **The section's CONCLUSION survives**, because the quantity it rests on is
+> index-independent: the learning curve measures whether a linear map on the pooled
+> 1536-d embedding can reproduce *a fixed 193-dimensional slice of Perch's output*,
+> and it flattens at max |Δ| ≈ 3.5 whichever 193 columns you pick. The head is
+> information-limited either way. Corrected species-level numbers are in §10g.
 
 Two spikes (2026-07-28). Both measured on the Pixel 9a; nothing built.
 
