@@ -400,6 +400,7 @@ protocol on it. The fix is more sessions, not more statistics.
 
 ## 9. Changelog
 - (2026-07-29) **Moving-shadow trial: MOG2 recommended, and the premise partly refuted** (§3c). Seven variants over a verbatim pipeline copy, 10 clips. **Baseline already emits only 1 false insect verdict across 4.5 min of heavy moving shadow** despite 27,390 raw blobs — the track filters and classifier absorb shadow already, so it costs compute, not precision, and "shadow forces shooting only in open shade" is not supported end-to-end. **Blob count is a misleading metric**: the best variant (MOG2 `detectShadows`) *triples* it, because vetoing shadow pixels fragments oversized blobs back into the accepted area range. Recall killed the cheap wins — chromaticity (−67 % blobs) loses 2 bees and its premise is broken on a white board; homomorphic σ25 (−18 %) loses the mount6 insect. **Recommended: MOG2 shadow veto** — holds baseline recall 11/13, removes the FP, +7 % detect time, where every homomorphic variant costs 1.5–4× for nothing. Caveat stated: the gain is **one** false positive; promising, not proven. **Nothing changed in the pipeline.**
+- (2026-07-29) **Live display passes where archive fails — §10f re-opened as §10g.** On a *targeted* set (the 41 non-leaked windows `results.db` actually flagged at ≥ 11) the fp16 embedder + linear head names **the same species as the laptop 95.1 %** of the time and holds it in **top-3 100 %** of the time — against 67 % / 85 % on the uniformly-sampled set §10f measured. **The first pass was worthless because uniform sampling of a mostly-quiet corpus put exactly ONE real detection in 400 windows**; every "case that matters" number rested on n = 1. Sampling uniformly to evaluate a detector measures the silence. Both things now hold at once: good enough to *show* a candidate, nowhere near good enough to *record* one (moves *Chorthippus brunneus* / Field Grasshopper by up to 2.10 logits against a 0.16 confirmed/rejected gap). Live operating point ≈ 9.0 (below the archive threshold, deliberately). Architecture noted: live scores **never** enter `results.db`, inference runs concurrently at a 6.6 % duty cycle rather than between segments, gate it on the new level meter, and memory (627 MB) is the real constraint. Caveat: n = 41, few species, and the head was fitted on this same corpus — 95 % is an **in-domain** number. **Feasible, not decided. Nothing built.**
 - (2026-07-29, bug) **Off-by-one class index in the on-device spike scripts — §10f's species-level numbers retracted.** `<model>/assets/labels.csv` has 14,796 lines against 14,795 model outputs (first line `inat2024_fsd50k`), and the header guard only stripped a literal `label`/`labels`, so every logit was attributed to the species after the one it was labelled with. **Production is unaffected** — `biomon/audio_pipeline.py` reads perch-hoplite's class list and never touches `labels.csv`; nothing in `results.db` changes. §10f's *conclusion* survives (the learning curve measures reproducing a fixed 193-dim slice, which is index-independent), but its *C. brunneus*, top-1 and genus figures are wrong. Corrected measurement in §10g.
 - (2026-07-29) **Weather recorded as a covariate; both correlations come back NOT significant.** New `session_weather` table (§4b) — separate from `sessions` because it is derived and re-fetchable, and it carries its own provenance including the grid point Open-Meteo actually served and the raw hourly rows. Backfilled all 8 sessions from the Open-Meteo archive (free, no key); 7 succeeded, `020825_0` has no coordinates and is stored as `source='missing'` rather than as a null. Means are **duration-weighted over the hours the captures overlap**, not calendar-day means. Results: wind vs score suppression **ρ = −0.80, p = 0.20 (n = 4)** — points the way the three earlier sessions suggested but does not clear significance; temperature vs visit rate **r = +0.18, p = 0.77 (n = 5)**, and temperature spans only 2.2 °C across the entire corpus so there is barely a predictor to correlate against. Cloud cover vs visit rate does clear significance (**r = −0.96, p = 0.009**) but is **confounded with site** (the one clear-sky session is the only meadow session) and cloud is the least trustworthy backfilled field (5–67 pp disagreement with the BirdNET app). **Suggestive, unconfirmed, nothing tuned on it.** The fix is more sessions, not more statistics.
 - (init) Doc created. Decisions: Perch-only, two-pipelines-one-spine, SQLite results, AMI for video, InsectSet459 for audio Orthoptera.
@@ -605,6 +606,89 @@ graph. Additional deployment friction on top of a chain that already fails.
 **Settled: recording on the phone, classification on the laptop.** Revisit only if
 Google ships a Perch head that consumes the pooled embedding, or a first-party
 mobile Perch.
+### 10g. Live display is a different question from archive — and it passes (2026-07-29)
+
+§10f rejected on-device classification against the **archive** bar. §0 argues live
+display has a different tolerance: a live call is *a candidate to confirm with your
+own eyes*, not a record. Re-measured on that basis, with the class-index bug of §10f
+fixed (perch-hoplite's class list, asserted against a known `results.db` row before
+anything else: db 13.68 → recomputed 13.70).
+
+**The first re-measurement was worthless and it is worth saying why.** The 400
+held-out windows were sampled *uniformly* over the corpus, and the corpus is mostly
+quiet — exactly **one** of the 400 was a window the desktop calls a detection. Every
+statement about "the case that matters" rested on n = 1. **Sampling uniformly to
+evaluate a detector measures the silence, not the detector.**
+
+Corrected, with a **targeted** set: the windows `results.db` actually flagged at
+≥ 11.0, minus any that leaked into the head's training data (220 flagged → 140 leaked
+→ 39 unresolvable → **41 clean**).
+
+| | uniform 400 (what §10f measured) | **targeted 41 (live-display case)** |
+|---|---|---|
+| top-1 = desktop | 67.0 % | **95.1 %** |
+| top-3 contains desktop | 85.0 % | **100 %** |
+| genus | 68.5 % | 95.1 % |
+| bird vs Orthoptera | 93.8 % | 97.6 % |
+| max abs Δ logit | 4.51 | 3.30 |
+| *C. brunneus* (Field Grasshopper) max abs Δ | 3.86 | 2.10 |
+
+**Both things are true at once.** On windows where something is genuinely calling,
+the fp16 embedder + linear head names *the same species the laptop would* 95 % of the
+time and holds the right answer in its top 3 **every** time. And it is still nowhere
+near the archive bar: the *Chorthippus brunneus* (Field Grasshopper) confirmed/rejected
+gap is **0.16 logits** and this chain moves that species by up to **2.10**. So:
+**display yes, record no.** That is not a compromise, it is the §0 distinction holding.
+
+(Note the corrected *C. brunneus* figure is **3.86** on the uniform set, not the
+0.615 §10f reported — the old number described a different species entirely.)
+
+**On-device display threshold** (targeted set, fp16):
+
+| device thr | shown | top-1 ok | top-3 ok | fabricated |
+|---|---|---|---|---|
+| 9.0 | 100 % | 95.1 % | 100 % | 2.4 % |
+| 10.0 | 87.8 % | 94.4 % | 100 % | 2.8 % |
+| 11.0 | 68.3 % | 92.9 % | 100 % | 3.6 % |
+
+**~9.0 is the live operating point** — it surfaces everything the laptop would flag,
+at 2.4 % fabrication. Note the live threshold is *lower* than the archive threshold
+and that is correct: a missed candidate teaches nothing, a shown candidate is
+confirmed by the person standing there.
+
+#### Architecture, if it gets built
+
+- **Live scores never enter `results.db`.** Not with a different `score_type`, not in
+  the same table with a flag. A separate `live_display` table (or nothing persisted at
+  all), tagged `score_type = 'perch_fp16_live'`, never joined by `results_scored`.
+  §4's rule is that false comparability is worse than an obviously different number,
+  and these differ by up to 3.3 logits from the archive quantity of the same name.
+- **Inference runs concurrently, not between segments.** §10f measured **330 ms per
+  5 s window** at 4 threads — a **6.6 % duty cycle**. There is no need to interleave
+  it with segment boundaries, and doing so would either gap the recording or delay the
+  display past the moment it is meant to serve. Segments are file boundaries, not
+  capture breaks.
+- **Gate inference on the level meter.** The recorder now measures RMS dBFS on every
+  captured buffer. The corpus median window has a max logit of 7.4 — mostly nothing.
+  Skipping embedding on windows sitting at the silence floor should cut inference work
+  substantially for free, and the measurement already exists.
+- **The real constraint is memory, not compute**: 627 MB peak for the fp16 embedder,
+  on a phone that is simultaneously recording. That is the number to check first on
+  hardware.
+
+**What this does NOT establish.** n = 41, dominated by *Chorthippus brunneus* (Field
+Grasshopper) with a handful of *Phylloscopus collybita* (Common Chiffchaff),
+*Coloeus monedula* (Western Jackdaw), *Corvus cornix* (Hooded Crow) and others — it
+is not a broad species test. More importantly the head was **fitted on 2,200 windows
+from this same corpus**, i.e. these sites, this microphone. Its 95 % is an
+in-domain number; a live display in an unfamiliar place could be materially worse,
+and nothing here measures that. The single top-1 disagreement is also instructive:
+the phone said *Chorthippus brunneus* (Field Grasshopper) where the laptop said
+*Phylloscopus collybita* (Common Chiffchaff) — a cross-group confusion, the exact
+error a live display would show most confidently and most wrongly.
+
+**Status: feasible, not decided. Nothing built.**
+
 ### 10e. Known physical limits (set expectations now)
 - **Built-in phone mics cap at 48 kHz** via `AudioRecord` (24 kHz Nyquist). That is ample for
   birds and Orthoptera (Perch's usable band is 0–16 kHz; stridulation 8–16 kHz), and it will
