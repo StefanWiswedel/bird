@@ -38,3 +38,4 @@ analysis/*.db.bak
 analysis/*.db.*bak
 *.bak
 analysis/*_run.log
+data/**/report.html
