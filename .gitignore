@@ -44,3 +44,8 @@ analysis/*_video2.log
 analysis/*_audio.log
 analysis/gbif_month_cache.json
 analysis/season_build.log
+analysis/consensus_*.json
+analysis/*_perch.log
+analysis/*_birdnet.log
+analysis/REC_*_bird_*.csv
+data/300726_stub/
