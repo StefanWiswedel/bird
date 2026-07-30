@@ -76,6 +76,35 @@ Model work that improves labels on 22 detections is effort spent at the wrong en
 Corollary: prefer work that is unblocked and compounding (more captures, licence
 cleanliness, the results store) over work that is merely conspicuous (model swaps).
 
+### 2d. Distinguish "the call failed" from "the answer is no".
+
+A general rule, earned twice in two days at real cost:
+
+- The species-image prefetch reported **"529 of 538: no usable photo"**. Both API calls
+  were correct. It was firing 1,076 requests with no pacing, and Wikimedia rate-limits
+  hard — a measured burst returns 200 **nine** times and then 429 for everything after,
+  which is exactly how many images arrived. The code mapped every non-200 to "no photo",
+  so a throttling failure was indistinguishable from an absent photograph, and it sent
+  two people to debug the query rather than the pacing.
+- The thermally-killed recording (§6c) rebuilt cleanly, dropped its rotation matrix, and
+  reported **"104 blobs, 1 insect"** while silently monitoring 60 % of the board. A run
+  that had half-failed looked like a run that had succeeded and found little.
+
+Both have the same shape: **a partial failure that produces confident, plausible-looking
+output.** That is far more dangerous than a crash, because nothing prompts you to
+disbelieve it, and the plausible number gets written down.
+
+So, everywhere:
+
+- **Never let a transport, permission or resource failure be reported in the same channel
+  as a negative result.** Count and surface them separately — "3 network errors, try
+  again" is a different sentence from "3 species have no photograph".
+- **When a result is suspiciously low, check the denominator before believing it.**
+  Compare against a known-good run: paper-mask area against another capture from the
+  same rig, download successes against the number of requests actually answered.
+- Applies equally to the pipeline: a capture that yields no detections and a capture that
+  failed to decode must never look alike in a report.
+
 ## 3. Model decision — Perch for audio (BirdNET retired on validation, not on schedule)
 - **All audio moves to Perch 2.0** (Apache-2.0, commercially clean). Birds too — Perch is SOTA on BirdSet.
 - **Keep BirdNET installed and working until Perch is validated. Delete only on evidence, not on schedule.** It's CC BY-NC-SA (non-commercial) so it cannot ship, but it stays as the prototyping + sanity-check reference until Perch demonstrably matches it.
@@ -377,6 +406,32 @@ One table, both pipelines write to it. Draft columns:
 - pipeline-specific features stored alongside (e.g. audio: pulse_rate, peak_freq, bout_dur, temp; video: blob_area_mm, residence_s)
 - `lat`, `lon`, `verified_taxon`
 Store as SQLite (single file, zero-admin).
+
+**A geographic list is not a plausibility filter — but seasonality was NOT the fix.**
+Denmark's list contains Fieldfare, Brambling, Lapland Longspur and Whooper Swan because
+they occur *in Denmark*, not because they occur in Copenhagen in July. So a month-of-year
+plausibility filter was built from GBIF's month-faceted Danish occurrence records (no API
+key, DOFbasen included; a month counts as plausible at ≥ 2 % of that species' annual
+Danish records, species with < 30 records get every month open, 27 species with no Danish
+records **fail open**). It is applied at **display time only** — out-of-season detections
+stay stored and reviewable, because an out-of-season bird is the most interesting thing
+this project could find and a filter that deleted it would be worse than useless.
+
+**Recorded as an honest null result: it removed 7 species of 51 alone, and ZERO on top of
+the score threshold.**
+
+| | season OFF | season ON |
+|---|---|---|
+| 9.0 / ≥1 detection *(old)* | 51 | 44 |
+| **11.0 / ≥2 detections** | **7** | **7** |
+
+Every species it catches was already a single hit at 9.0–10.5, so the score-plus-repeat
+rule did 44 of the 44 removals. The filter is **kept for the case it was built for** — a
+winter thrush scoring 12, which no threshold can catch — but it must not be remembered as
+one of the fixes, because it fixed nothing here. It also cannot help with *Lophophanes
+cristatus* (Crested Tit), *Regulus regulus* (Goldcrest) or *Bubo bubo* (Eurasian
+Eagle-Owl): all three are **resident** in Denmark and implausible in central Copenhagen
+for habitat and rarity reasons, which is a prior we do not have.
 
 **A third model's opinion is not ground truth.** `external_claims` holds species claims
 made by other classifiers (Merlin Sound ID, the BirdNET Live app) — separate from
