@@ -715,16 +715,209 @@ segments — and the last segment of `290726_0` (also late, also hot) ran at 28.
 camera was already throttling its frame rate before it died, which is a thermal signal
 visible in the metadata of every hot capture.
 
+### 6d. First interval-stills capture — session `300726_1` (2026-07-30)
+
+**1,026 images at 1.973 fps over 8.7 minutes, 4032×3024, yellow panel with diluted
+lavender oil, 22.9 °C and 0 % cloud — the hottest and clearest capture in the corpus.**
+The pipeline reported **0 insects. That is a false negative, and the two reasons it
+happened are the substance of this section.**
+
+Read it alongside §6c: both are cases where a run *completed* and produced a confident,
+plausible number while being wrong (§2d).
+
+#### The stills path itself — an adapter, not a second pipeline
+
+`biomon/image_sequence.py` presents a folder of JPEGs through the `VideoCapture` subset
+`process()` uses, so the validated detection logic is untouched. Three things differ from
+video and all three are stated in code:
+
+- **`STEP` must be 1.** Every interval still is already a deliberate sample; skipping four
+  of five would sample 2 fps at 0.4 fps and put successive detections 2.5 s apart, outside
+  the linker's `DT = 0.6 s`. No track would ever form.
+- **Timestamps are nominal.** Android filenames carry whole seconds, so frame *i* is
+  placed at `i / fps`. Real spacing jitters ±0.5 s around that. Residence times from
+  stills are a lower-precision measurement than residence times from video.
+- **Bursts are found, not assumed.** The folder held the 1,026-image session plus two
+  10-image framing bursts, one from 21:22 the previous night. Those are not harmless: the
+  background is built from frames sampled across the whole source, so a night-time board
+  would enter the median that every daytime frame is then differenced against.
+
+#### THREE CONSTANTS THAT WERE SECRETLY ABOUT THE CAMERA, NOT THE INSECT
+
+The same defect as the persistence filter in §6b, three more times. Each was corrected by
+deriving the constant from a measurable property of the capture, and each derivation
+**reproduces the corpus value exactly** — verified, not argued.
+
+| constant | was | means at 1.97 fps / 12 MP | corrected to | corpus unchanged? |
+|---|---|---|---|---|
+| `AMIN`/`AMAX` blob area | 8..2500 px | board is **4.65×** the corpus area, so "insect-sized" became "small insect only" | 37..11620, scaled by measured board area | yes — `area_scale` is opt-in |
+| `RollingMedian(sample_every=30)` | 30 frames | **730 s** window — longer than the whole capture, so the buffer never filled and the background was the median of the entire session | `for_rate()`: 240 real seconds at any rate, so 10 here | yes — returns 30 at 5.97 Hz; re-ran `240726_1` and diffed 2,410 blobs byte-for-byte |
+| crop context floor / `EMAFreeze(alpha=0.02)` | 90 px / 50 frames | context collapses from ~7.5× the blob to 1.9×; EMA time constant 8.4 s becomes 25 s | **NOT changed** — swept and refuted below / no white stills capture to verify against | n/a |
+
+**The area limits deserve the general statement.** Both existing colour sessions already
+produce blobs sitting exactly on the 2500 ceiling, so the ceiling is live, not slack. A
+pixel is not a property of an animal. Any threshold in pixels is a threshold about the
+*camera*, and it silently changes meaning when the camera does.
+`tools/area_scale_probe.py` uses the board as the ruler and prints the conversion.
+
+#### The support wires — 94.6 % of everything
+
+Raw output was **20,232 blobs in 8.7 minutes**, against 2,689 for a 23-minute video
+session. The count was not flat: it ramped from 0 per frame in the first minute to 40 in
+the ninth. A blob heatmap put **94.6 % of them on three horizontal lines** — the board's
+two support wires and a decking seam — and phase correlation showed the camera **sinking
+monotonically, 11.7 px over the capture**. The mount sagged, and a slow drift past a
+horizontal high-contrast wire lights up its whole length, worse as the drift grows.
+
+**Why the video corpus never showed this.** The same wires are in the 1080p captures. At
+that resolution they are about a pixel wide in the half-scale crop and the 3×3
+`MORPH_OPEN` erased them. At 12 MP they survive it. **The bug did not appear because the
+board changed; it appeared because the sensor got better.** Raising resolution moved a
+physical structure across a filter's threshold.
+
+`biomon/registration.py` aligns each frame to the first sampled frame by phase correlation
+before the background sees it — translation only, because the measured failure is a shift
+and fitting rotation and scale would give a moving insect three more parameters to hide
+in. It refuses rather than guesses: a weak correlation or an implausible shift means the
+frame passes through unshifted and is *counted* in the log (§2d).
+
+| variant | blobs | on the wires | elsewhere | tracks | insects |
+|---|---|---|---|---|---|
+| as-was | 20,232 | 19,141 | 1,091 | 566 | 0 |
+| + 240 s median window | 9,300 | 9,260 | 40 | 367 | 0 |
+| + registration | **3,610** | 3,537 | 73 | 199 | 0 |
+
+An 82 % reduction, and **the insect count is 0 in all three**. 3,537 blobs still sit on the
+wires, because a wire in 4.6 m/s wind moves independently of the board and no global
+translation can register that away. **The remaining fix is physical, not computational:
+do not run wires across the board.** Masking them would cost ~8 % of board area and is
+worth building only if the wires stay.
+
+#### THE TWO REASONS THE COUNT IS ZERO
+
+**(1) Real visits lasted one or two frames, and `MIN_SAMPLES` — not the rate-derived
+rule — is what deleted them.** `tools/stills_candidates.py` reproduces the set;
+`300726_1_stills/discarded_candidates.jpg` is all **17** of them at full resolution. At
+least four are unambiguous insects settled on the panel — a sharply focused fly at +07:44
+with legs, wings and thorax visible, an in-focus beetle at +01:46 — plus roughly seven
+more in flight, several with visible wing-beat streaks. Frame by frame the fly is
+**present in frame 917 and absent in 913–916 and 918–921**.
+
+**And the beetle at +01:46 is the precise diagnosis.** It appears in TWO consecutive
+frames, +01:46 and +01:47 — a ~0.5 s measured span, which **passes** the rate-derived
+duration test (`dur ≥ 0.461 s` at 1.97 Hz) and fails only the sample count. Look at what
+`persistence()` actually computes:
+
+| rate | rate-derived `n` | `MIN_SAMPLES` floor | which binds |
+|---|---|---|---|
+| 5.97 Hz (video corpus) | 3 | 3 | neither — they agree |
+| 3.00 Hz (adopted rate) | **1** | 3 | **the floor** |
+| 1.97 Hz (this capture) | **1** | 3 | **the floor** |
+
+§6b was careful to state the persistence rule in the animal's terms, and it did — for the
+duration half. **`MIN_SAMPLES = 3` is the half that stayed in the camera's terms.** It is
+invisible at the corpus rate because it coincides with the derived value there, and it
+becomes an override the moment the capture rate drops. Its stated justification is "enough
+frames to link a track and vote a class" — and **(2) below removes the second half of that
+justification**, because the vote fails regardless of how many frames it gets.
+
+**This also measures §6b's caveat 1, and the answer is the unwelcome one.** The fps knee
+test could not see visits under 0.8 s because the persistence filter had already deleted
+them, so their frequency was unknown. Here, where a single 12 MP frame is unambiguous
+enough to adjudicate by eye, **short visits are not a minority — they are all of them.**
+
+Relaxing the floor has a price, so here it is rather than a recommendation without one —
+candidate tracks at each threshold, over every stored `blobs.csv`:
+
+| capture | n≥3 (now) | n≥2 | n≥1 |
+|---|---|---|---|
+| `mount2` | 5,876 | 10,819 | 23,191 |
+| `jetty1` | 5,313 | 7,018 | 10,629 |
+| `meadow` | 1,527 | 1,950 | 2,867 |
+| `b0726` | 111 | 133 | 222 |
+| `300726_1` | **0** | 0 | 17 |
+
+**The open decision (the observer's, per §2b): make `MIN_SAMPLES` follow the capture
+mode.** Continuous video has the temporal density to afford `n ≥ 3`; interval stills at
+≤3 fps do not, because a visit shorter than `n / rate` seconds is *structurally* invisible
+to them. This is not a threshold to tune per capture — it is one rule that has to be
+stated in the animal's terms, like `MIN_PRESENCE_S`.
+
+**(2) And relaxing it would not have helped, because the classifier rejects all 17.**
+Every candidate comes back junk at 41–92 % confidence, including **`none_dirt` at 87 % on
+the sharp fly** and `none_bg` at 88 % on the in-focus beetle. Two hypotheses were swept and both refuted:
+
+- **Framing.** In the corpus a median blob leaves `side = max(max(w,h)*2*1.9, 90)` pinned
+  at the 90-px floor, so the insect fills about an eighth of the crop; at 12 MP the same
+  expression gives 1.9× the blob and the insect fills the frame. Context factors 1.9, 3.0,
+  4.5, 6.0, 7.5, 10.0 give **0, 0, 0, 0, 0, 1** insect verdicts of 14.
+- **Pixel scale.** Downsampling the whole frame toward the corpus's own resolution
+  (1×, 1/1.5, **1/2.16**, 1/3, 1/4.5) gives **0, 0, 0, 0, 1** of 14.
+- **Control, so the finding is not a bug in the probe.** The same inference code on the
+  corpus's 63 confirmed insect crops returns **54 insect**. The code is sound.
+- Both sweeps ran over the 14 largest candidates, before the structure rule in
+  `stills_candidates.py` was tightened from a size guess to pure recurrence; the tool's
+  own pass over the final 17 returns **0 insect** as well.
+
+By elimination this is **domain mismatch** — the parking-lot risk, now measured on real
+data rather than anticipated. The 27-class model was trained on the insect-detect rig and
+does not transfer to a hand-painted yellow panel at 12 MP. **It fails confidently, which
+is the dangerous way to fail:** a session that reads "0 insects" is indistinguishable from
+a session where nothing came.
+
+This is the strongest evidence yet for Phase 2.5 (better video classifier), and it changes
+its character: not an accuracy upgrade, a **correctness** problem. Until it is addressed,
+**interval-stills captures must not be reported as counts.** The detector output plus the
+candidate sheet is the honest deliverable.
+
+#### Thermal — the claim is plausible and this capture cannot test it
+
+The observer reports the phone overheated again and suspects it would overheat *idle* at
+these temperatures. What the data says:
+
+- The capture rate is **flat to the last frame** — 1.98 fps in minute 0, 1.95 in minute 8,
+  no gaps, and every one of the 1,026 JPEGs ends with a valid `ffd9` marker. That is
+  **unlike** `290726_2`, where the frame rate had already fallen to 28.14 from 29.87
+  before the camera died. No throttling ramp here.
+- But it ran only **8.7 minutes**, far short of what would test heat tolerance, and
+  interval stills are individually complete files by nature, so "nothing truncated" is
+  weaker evidence than it looks.
+- **It was a Pixel 6a, not the 9a used for every video session.** Any comparison with
+  yesterday's video cutoff compares two phones.
+- Data rate was **3.70 MB/s sustained** (1.93 GB in 8.7 min). 12 MP JPEG at 2 fps is ISP,
+  encoder and flash write all at once; it is not obviously a lighter load than 1080p
+  H.264, and §6b's thermal argument for interval stills **still rests on mechanism, not on
+  a measurement**.
+
+**So the honest position is unchanged from §6b: the thermal saving is asserted, not
+measured.** Testing it needs a deliberate run — same phone, same sun, video then stills,
+with `dumpsys thermalservice` logged — not another opportunistic capture.
+
+#### Efficiency note (a cost, not a finding)
+
+At 12 MP the rolling median costs **2.89 s per rebuild**, and holding the window at 240 s
+means one rebuild every 10 frames: ~5 min of the ~8 min detection pass. At the adopted
+3 fps that is ~35 min of background computation per recorded hour. Parking lot: the
+background does not need full resolution, but downsampling it changes results and so needs
+its own measurement.
+
 ## 7. Hardware (context, not code)
 - Printed A4 tray + post + phone platform; square-post/socket + side thumbscrew coupling; north-side orientation for shadow; locked manual focus. (Frame essentially designed; printing pending.)
 
 ## 8. Open questions / parking lot
+- **Rig: no wires across the board.** They are 94.6 % of `300726_1`'s blob output and wind moves them independently of the board, so registration cannot remove them (§6d). Physical fix first; a wire mask costs ~8 % of board area and is only worth building if the wires stay.
+- **Rolling median is the compute bottleneck at 12 MP** - 2.89 s per rebuild, ~35 min per recorded hour at 3 fps. The background does not need full resolution, but downsampling it changes results, so it needs its own measurement (§6d).
+- **`EMAFreeze(alpha=0.02)` is a 50-FRAME time constant**, i.e. 8.4 s at 5.97 Hz and 25 s at 1.97 Hz - the same rate-dependence fixed for the median window, deliberately left alone because there is no white-board stills capture to verify a fix against (§6d).
+- **Thermal saving from interval stills is still unmeasured.** Needs a deliberate run: one phone, one sun, video then stills, `dumpsys thermalservice` logged (§6b, §6d).
 - Native app (APK) needed for unattended deployment; PWA insufficient for background camera. Not started.
 - Domain mismatch: public clips are recordist-quality; deployment audio is cheap-mic-in-a-garden. Band-limit training to mic bandwidth and/or add a few own recordings per region for calibration.
 - Verification-as-a-feature: the differentiator competitors lack. Human-in-the-loop confirm/correct that feeds a defensible local dataset.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-07-30) **First interval-stills capture, and it reported 0 insects when at least three are plainly visible (§6d).** 1,026 images at 1.97 fps. Three constants that read as being about insects turned out to be about the camera: blob area limits (the board is **4.65×** the corpus area, so 8..2500 px meant "nothing bigger than a fifth of the corpus maximum"), the rolling-median window (`sample_every=30` is 240 s at 5.97 Hz and **730 s** at 1.97 Hz, longer than the whole capture), and the crop context floor. Each fix derives the constant from the capture and reproduces the corpus value exactly - `240726_1` re-ran to 2,410 blobs byte-for-byte. Also **the mount sagged 11.7 px**, which put **94.6 % of 20,232 blobs on the board's two support wires**; the corpus never showed this because at 1080p the wires were a pixel wide and `MORPH_OPEN` erased them - **the bug appeared because the sensor got better**. Window fix plus phase-correlation registration take 20,232 blobs to 3,610. The count stays 0 in all three variants: every real visit lasted **one frame**, so `n>=3` removes them, and the classifier calls all 14 candidates junk at 41-92 % - **`none_dirt` 87 % on a sharply focused fly**. Framing (1.9×-10× context) and pixel scale (1×-4.5× downsample) both swept and refuted; a control on the corpus's own 63 confirmed crops returns 54 insect, so the probe is sound and this is **domain mismatch**, measured at last rather than anticipated.
+- (2026-07-30, **measures a caveat that was open since §6b**) **The sub-0.8 s blind spot is not a minority case - in `300726_1` it is every case.** The fps knee test could not see visits under 0.8 s because the persistence filter had already deleted them. At 12 MP a single frame is unambiguous enough to adjudicate by eye, and every one of the 14 candidates is single-frame. One candidate persisted TWO frames and so **passed** the rate-derived duration test, failing only the sample count: `MIN_SAMPLES=3` is the half of the persistence rule that stayed in the camera’s terms, invisible at 5.97 Hz where it coincides with the derived value and an override at every lower rate (derived n is **1** at both 3.0 and 1.97 Hz). The open decision — the observer’s, per §2b — is whether it should follow the capture mode, with the price tag in §6d.
+- (2026-07-30, **rule earning its keep**) §2d again, twice in one session: "20,232 blobs" was a drifting mount reported as activity, and "0 insects" was two filters reported as an empty board. Both runs exited 0.
 - (2026-07-30) **Live-ID curation: 51 species -> 7.** The app showed 51 species in a 42-minute recording where ~8 were real, the genuine birds buried among one-off junk at 9.0-9.5. Measured first (`tools/live_threshold_sweep.py`): at 9.0 with no repeat rule, 51 species; at **11.0 with >= 2 windows, 7** - Greenfinch, Great Tit, Blue Tit, House-Martin, Magpie, Carrion Crow, Goldfinch, and none of the Cory's Shearwater / Eagle Owl / Tundra Swan. **11.5 was over-tuned**: it leaves 3 and discards 4 real birds, so the defaults come from the table, not the guess. Also fixed a section 4 violation: the live path filtered as it WROTE, baking the threshold into the file. It now stores everything above a 9.0 retention floor (5 candidates/window) and filters at read time, so a slider re-filters instantly with no re-analysis. Feed and summary share the settings and both order by TIME, newest first. "possibly" dropped - with 51 species the hedge applied to everything and so meant nothing.
 - (2026-07-30, **null result**) **Seasonal plausibility filter built, and it changed nothing.** GBIF month-faceted Danish records give real phenology per species (Fieldfare 0.94 % of records in July, Lapland Longspur 0.00 %, Great Tit 4.14 %). Alone it removes 7 of 51; **on top of the threshold it removes 0**, because everything it catches is already a single low hit. Kept for the case it was built for - a winter thrush scoring 12 - and explicitly not counted as one of the fixes. Cannot help with Crested Tit, Goldcrest or Eagle Owl: all resident in Denmark, implausible in central Copenhagen for habitat reasons, a prior we do not have.
 - (2026-07-30, **new rule 2d**) **Distinguish "the call failed" from "the answer is no."** Earned twice: 429 rate-limiting reported as "no photo on Commons" for 529 species (both API calls were correct - 1,076 unpaced requests, and a burst returns 200 nine times then 429), and a dropped rotation matrix reported as "1 insect" while monitoring 60 % of the board. Both are partial failures producing confident, plausible output, which is more dangerous than a crash because nothing prompts you to disbelieve it.
