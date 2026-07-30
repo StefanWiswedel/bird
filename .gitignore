@@ -42,3 +42,5 @@ data/**/report.html
 analysis/rerun_*.log
 analysis/*_video2.log
 analysis/*_audio.log
+analysis/gbif_month_cache.json
+analysis/season_build.log
