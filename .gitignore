@@ -1,5 +1,6 @@
 # --- raw captures & derived media (large, not source) ---
 data/**/*.mp4
+data/**/*.jpg
 data/**/*.wav
 data/**/*.flac
 data/**/*.WAV
