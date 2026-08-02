@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Neutral tone 6 from the app's own palette (Theme.kt), so the icon and the app
+         read as one thing rather than two. Dark, because the app is used at dawn and
+         dusk and a bright tile is the only thing on the home screen that glares. -->
+    <color name="ic_launcher_background">#0F1511</color>
+</resources>

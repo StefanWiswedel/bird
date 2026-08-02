@@ -7,3 +7,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "FieldRecorder"
 include(":app")
+include(":station")

@@ -24,6 +24,7 @@ __pycache__/
 recorder/.gradle/
 recorder/build/
 recorder/app/build/
+recorder/station/build/
 recorder/local.properties
 *.apk
 *.keystore

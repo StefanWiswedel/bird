@@ -1,0 +1,1263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Biomon Station</title>
+<style>
+/* Palette: warm field-guide tones — parchment, moss, bark, gold — instead of a dark
+   tech aesthetic. Light values are the default; dark overrides via prefers-color-scheme,
+   same tone MAPPING, not a second hand-picked palette. */
+:root {
+  --bg: #f6f1e4; --surface: #fffcf5; --surface-alt: #efe6d1; --surface-high: #e7dabd;
+  --ink: #2a2118; --ink-soft: #6c5c46; --line: #ddceac;
+  --moss: #3f5c3a; --on-moss: #f5f8ee; --moss-container: #dbe8d1; --on-moss-container: #16260f;
+  --bark: #7a4a20; --on-bark: #fff6ea; --bark-container: #f0dcc0; --on-bark-container: #2e1c08;
+  --gold: #9c6d1e; --gold-container: #f6e5bd; --on-gold-container: #3a2a05;
+  --rust: #a3402a; --on-rust: #fff5f1; --rust-container: #f6ddd3; --on-rust-container: #401a0f;
+  --shadow: 0 1px 2px rgba(42,30,10,.07), 0 2px 12px rgba(42,30,10,.06);
+  --spectro-bg: #1b1208;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17130c; --surface: #1e1810; --surface-alt: #251e14; --surface-high: #2e2517;
+    --ink: #ece2cd; --ink-soft: #b4a284; --line: #3a2f1d;
+    --moss: #93c281; --on-moss: #0e1c0a; --moss-container: #2a3c23; --on-moss-container: #cfe8c4;
+    --bark: #e0a565; --on-bark: #3a2308; --bark-container: #4a3013; --on-bark-container: #f4dcb8;
+    --gold: #e8c069; --gold-container: #4a3a12; --on-gold-container: #f8e7bb;
+    --rust: #e59379; --on-rust: #3d150c; --rust-container: #4a2015; --on-rust-container: #f6d9cd;
+    --shadow: 0 1px 2px rgba(0,0,0,.35), 0 2px 14px rgba(0,0,0,.3);
+    --spectro-bg: #100b06;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 15px/1.5 -apple-system, "Segoe UI", Roboto, "Noto Sans", Helvetica, Arial, sans-serif;
+  font-feature-settings: "tnum";
+  padding-bottom: 3rem;
+  -webkit-tap-highlight-color: transparent;
+}
+a { color: inherit; }
+h1, h2, h3 { margin: 0; }
+.serif { font-family: Georgia, "Iowan Old Style", "Noto Serif", "Times New Roman", serif; }
+.hidden { display: none !important; }
+button, input { font-family: inherit; }
+
+/* ---------- header ---------- */
+header {
+  position: sticky; top: 0; z-index: 20;
+  background: var(--surface); border-bottom: 1px solid var(--line);
+  padding: .65rem 1rem; display: flex; align-items: center; gap: .6rem;
+}
+.brand { display: flex; align-items: center; gap: .5rem; }
+.brand svg { width: 24px; height: 24px; color: var(--moss); flex: none; }
+.brand-text { display: flex; flex-direction: column; line-height: 1.15; }
+.brand-name { font-family: Georgia, "Iowan Old Style", "Noto Serif", serif; font-weight: 700; font-size: 1.12rem; letter-spacing: .01em; }
+.brand-station { color: var(--ink-soft); font-size: .74rem; letter-spacing: .04em; text-transform: uppercase; }
+.spacer { flex: 1; }
+.pill {
+  display: inline-flex; align-items: center; gap: .35rem;
+  padding: .28rem .65rem; border-radius: 99px; font-size: .74rem; font-weight: 700;
+  background: var(--surface-alt); color: var(--ink-soft); letter-spacing: .02em;
+}
+.pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.good { background: var(--moss-container); color: var(--on-moss-container); }
+.pill.bad { background: var(--rust-container); color: var(--on-rust-container); }
+
+nav.tabs {
+  position: sticky; top: 53px; z-index: 19;
+  display: flex; gap: .3rem; padding: .55rem 1rem; background: var(--bg);
+  border-bottom: 1px solid var(--line); overflow-x: auto;
+}
+nav.tabs button {
+  appearance: none; border: 1px solid transparent; background: var(--surface-alt); color: var(--ink-soft);
+  font: inherit; font-weight: 700; font-size: .82rem; padding: .4rem .9rem;
+  border-radius: 99px; cursor: pointer; white-space: nowrap; transition: background .15s, color .15s;
+}
+nav.tabs button.active { color: var(--on-moss); background: var(--moss); }
+nav.tabs button:hover:not(.active) { background: var(--surface-high); }
+
+main { max-width: 620px; margin: 0 auto; padding: 1rem 1rem 0; }
+.panel { display: none; }
+.panel.active { display: block; }
+
+/* ---------- shared bits ---------- */
+.card {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 16px; padding: 1rem; box-shadow: var(--shadow);
+}
+.section-label {
+  font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--ink-soft); margin: 1.4rem 0 .55rem;
+}
+.section-label:first-child { margin-top: 0; }
+
+.banner {
+  display: flex; align-items: flex-start; gap: .6rem; border-radius: 14px;
+  padding: .7rem .9rem; margin-bottom: 1rem; font-size: .86rem;
+}
+.banner.caveat { background: var(--gold-container); color: var(--on-gold-container); }
+.banner.bad { background: var(--rust-container); color: var(--on-rust-container); }
+.banner svg { width: 18px; height: 18px; flex: none; margin-top: .1rem; }
+
+.avatar {
+  width: 50px; height: 50px; border-radius: 50%; flex: none; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--moss-container); color: var(--on-moss-container);
+  border: 1.5px solid var(--surface);
+}
+.avatar svg { width: 60%; height: 60%; }
+.avatar img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: pointer; }
+
+/* ---------- lightbox ---------- */
+.lightbox {
+  position: fixed; inset: 0; z-index: 50; display: none; align-items: center; justify-content: center;
+  background: rgba(10, 7, 3, .82); padding: 2.2rem;
+}
+.lightbox.open { display: flex; }
+.lightbox img {
+  max-width: 100%; max-height: 100%; border-radius: 14px; display: block;
+  box-shadow: 0 12px 44px rgba(0,0,0,.5);
+}
+.lightbox-close {
+  position: absolute; top: 1.1rem; right: 1.1rem; width: 40px; height: 40px; border-radius: 50%;
+  border: none; background: rgba(255,255,255,.14); color: #fff; font-size: 1.4rem; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.lightbox-close:hover { background: rgba(255,255,255,.24); }
+
+.taxon-name { min-width: 0; }
+.taxon-name .common { font-weight: 700; }
+.taxon-name .sci { color: var(--ink-soft); font-style: italic; font-size: .88em; }
+.taxon-name .sci::before { content: " "; font-style: normal; }
+
+.tag {
+  display: inline-flex; align-items: center; font-size: .68rem; font-weight: 700;
+  padding: .08rem .4rem; border-radius: 6px; background: var(--surface-alt); color: var(--ink-soft);
+}
+.tag.plausibility { background: var(--gold-container); color: var(--on-gold-container); }
+
+.empty {
+  text-align: center; color: var(--ink-soft); padding: 2.4rem 1rem;
+}
+.empty svg { width: 32px; height: 32px; margin-bottom: .6rem; opacity: .55; color: var(--moss); }
+
+/* ---------- summary bar ---------- */
+.summary-bar {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: .55rem;
+  margin-bottom: 1rem;
+}
+@media (min-width: 480px) { .summary-bar { grid-template-columns: repeat(3, 1fr); } }
+.sum-item {
+  display: flex; align-items: center; gap: .55rem; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 14px; padding: .6rem .7rem;
+}
+.sum-item svg { width: 18px; height: 18px; flex: none; color: var(--bark); }
+.sum-n { font-weight: 700; font-size: .98rem; line-height: 1.15; }
+.sum-l { font-size: .7rem; color: var(--ink-soft); }
+
+/* ---------- live spectrogram: full-bleed row above main, its own section —
+   not nested in the detection card, which shows a named species while this shows
+   always-on ambient audio. Sits flush under the tab bar like header/nav (no
+   max-width wrapper), matching BirdNET Live's layout. ---------- */
+.live-spectro {
+  background: var(--spectro-bg); border-bottom: 1px solid #000;
+  padding: .65rem 0 .5rem;
+}
+.spectro-toplabel {
+  display: flex; align-items: center; gap: .4rem; padding: 0 1rem .5rem;
+  font-size: .68rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #c9a765;
+}
+.spectro-toplabel .live-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: #e5533c; flex: none;
+  animation: live-pulse 1.8s ease-out infinite;
+}
+@keyframes live-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(229,83,60,.55); }
+  70% { box-shadow: 0 0 0 7px rgba(229,83,60,0); }
+  100% { box-shadow: 0 0 0 0 rgba(229,83,60,0); }
+}
+.spectro-canvas-wrap { position: relative; overflow: hidden; background: #000; height: 130px; }
+.spectro-canvas-wrap canvas { display: block; width: 100%; height: 100%; }
+.spectro-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: #7c6b4d; font-size: .8rem; font-style: italic;
+}
+.spectro-axis {
+  display: flex; justify-content: space-between; padding: .35rem 1rem 0;
+  font-size: .64rem; color: #8a7a5c; font-feature-settings: "tnum";
+}
+
+/* ---------- latest detection card (species name/time/confidence — separate from
+   the always-on waterfall above) ---------- */
+.latest-card { display: flex; align-items: center; gap: .7rem; margin-bottom: 1.1rem; }
+.spectro-label { font-size: .68rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); }
+.spectro-title { color: var(--ink); font-weight: 700; font-size: .92rem; margin-top: .1rem; }
+.spectro-title .sci { color: var(--ink-soft); font-style: italic; font-weight: 400; font-size: .85em; }
+.spectro-title .sci::before { content: " "; font-style: normal; }
+.spectro-sub { color: var(--ink-soft); font-size: .74rem; margin-top: .1rem; }
+.spectro-play {
+  appearance: none; border: none; border-radius: 50%; width: 34px; height: 34px; flex: none;
+  background: var(--surface-alt); color: var(--ink); display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+}
+.spectro-play:active { background: var(--surface-high); }
+.spectro-play svg { width: 16px; height: 16px; }
+
+/* ---------- live toolbar / search ---------- */
+.live-toolbar { display: flex; align-items: center; gap: .5rem; margin-bottom: .75rem; }
+.search-box {
+  flex: 1; display: flex; align-items: center; gap: .45rem; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 12px; padding: .5rem .75rem;
+}
+.search-box svg { width: 16px; height: 16px; color: var(--ink-soft); flex: none; }
+.search-box input {
+  border: none; background: none; outline: none; color: var(--ink); font: inherit; font-size: .88rem;
+  width: 100%; min-width: 0;
+}
+.seg { display: flex; background: var(--surface-alt); border-radius: 12px; padding: .2rem; flex: none; }
+.seg button {
+  appearance: none; border: none; background: none; color: var(--ink-soft); font: inherit;
+  font-weight: 700; font-size: .76rem; padding: .35rem .6rem; border-radius: 9px; cursor: pointer;
+}
+.seg button.active { background: var(--surface); color: var(--moss); box-shadow: var(--shadow); }
+
+/* ---------- feed rows ---------- */
+.feed { display: flex; flex-direction: column; gap: .5rem; }
+.row {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.row.is-new .row-summary { animation: pop .5s ease-out; }
+@keyframes pop { from { transform: scale(.97); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.row.search-hidden { display: none; }
+.row.candidate { opacity: .7; }
+.row-summary {
+  display: flex; align-items: center; gap: .65rem; padding: .6rem .75rem; cursor: pointer;
+}
+.row-time { flex: none; width: 3.4rem; text-align: left; }
+.row-time .t { display: block; font-weight: 700; font-size: .84rem; font-feature-settings: "tnum"; }
+.row-time .d { display: block; font-size: .66rem; color: var(--ink-soft); }
+.row-main { flex: 1; min-width: 0; }
+.row-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row-sub { display: flex; gap: .3rem; margin-top: .2rem; flex-wrap: wrap; }
+.row-conf {
+  flex: none; font-weight: 700; font-size: .82rem; border-radius: 8px; padding: .2rem .5rem;
+  background: var(--moss-container); color: var(--on-moss-container);
+}
+.row-conf.candidate { background: var(--surface-alt); color: var(--ink-soft); }
+.row-chevron { flex: none; width: 18px; height: 18px; color: var(--ink-soft); transition: transform .2s ease; }
+.row.expanded .row-chevron { transform: rotate(90deg); }
+
+.row-detail { max-height: 0; overflow: hidden; transition: max-height .25s ease; }
+.row.expanded .row-detail { max-height: 260px; }
+.row-detail-inner {
+  padding: 0 .9rem 1rem; border-top: 1px solid var(--line); margin-top: -1px; padding-top: .8rem;
+  display: flex; flex-direction: column; gap: .6rem;
+}
+.row-detail-inner audio { width: 100%; height: 32px; }
+.clip-none { font-size: .78rem; color: var(--ink-soft); font-style: italic; }
+.row-detail-meta { display: flex; justify-content: space-between; font-size: .76rem; color: var(--ink-soft); flex-wrap: wrap; gap: .3rem; }
+.threshold-actions { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.bump-row { display: flex; gap: .4rem; }
+button.bump {
+  appearance: none; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface-alt); color: var(--ink); font: inherit; font-size: .74rem;
+  font-weight: 700; padding: .3rem .55rem; cursor: pointer; white-space: nowrap;
+}
+button.bump:hover { background: var(--surface-high); }
+button.bump:active { opacity: .8; }
+.bump-note { font-size: .72rem; color: var(--ink-soft); }
+.bump-note.ok { color: var(--moss); font-weight: 600; }
+
+/* ---------- days tab ---------- */
+.day-picker { display: flex; gap: .5rem; overflow-x: auto; padding-bottom: .3rem; margin-bottom: 1rem; }
+.day-chip {
+  flex: none; border: 1px solid var(--line); border-radius: 14px; padding: .5rem .8rem;
+  background: var(--surface); cursor: pointer; font-size: .78rem; text-align: left; min-width: 84px;
+}
+.day-chip.active { border-color: var(--moss); background: var(--moss-container); color: var(--on-moss-container); }
+.day-chip .d { font-weight: 700; }
+.day-chip .n { color: var(--ink-soft); }
+.day-chip.active .n { color: var(--on-moss-container); opacity: .8; }
+
+.hourchart { display: flex; align-items: flex-end; gap: 3px; height: 92px; margin: .5rem 0 .3rem; }
+.hourchart .bar {
+  flex: 1; background: var(--bark); border-radius: 3px 3px 1px 1px; min-height: 2px;
+  opacity: .85; position: relative; cursor: default;
+}
+.hourchart .bar:hover { opacity: 1; }
+.hourchart .bar[data-count="0"] { background: var(--surface-high); opacity: .6; }
+.hour-axis { display: flex; justify-content: space-between; font-size: .68rem; color: var(--ink-soft); }
+
+.mini-row {
+  display: flex; align-items: center; gap: .6rem; padding: .5rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.mini-row:last-child { border-bottom: none; }
+.mini-row .avatar { width: 38px; height: 38px; }
+.mini-row .taxon-name { flex: 1; min-width: 0; }
+.mini-row .mini-stats { text-align: right; flex: none; font-size: .78rem; color: var(--ink-soft); }
+.mini-row .mini-stats .n { font-weight: 700; color: var(--ink); }
+
+.weather-line { display: flex; gap: 1rem; font-size: .84rem; color: var(--ink-soft); flex-wrap: wrap; margin-top: .8rem; }
+
+/* ---------- species tab ---------- */
+.species-list { display: flex; flex-direction: column; gap: .5rem; }
+.sp-row {
+  display: flex; gap: .75rem; align-items: center; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 16px; padding: .65rem .8rem; box-shadow: var(--shadow);
+}
+.sp-row .avatar { width: 54px; height: 54px; }
+.sp-stats { font-size: .78rem; color: var(--ink-soft); margin-top: .15rem; }
+
+/* ---------- settings tab ---------- */
+.settings-form { display: flex; flex-direction: column; gap: 1.2rem; }
+.field label { display: block; font-weight: 700; font-size: .86rem; margin-bottom: .3rem; }
+.field .hint { font-size: .78rem; color: var(--ink-soft); margin-top: .3rem; }
+.field input[type=range] { width: 100%; accent-color: var(--moss); }
+.field .value { font-weight: 700; color: var(--moss); }
+.field input[type=number] {
+  width: 90px; font: inherit; padding: .35rem .55rem; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+}
+.toggle { display: inline-flex; align-items: center; gap: .45rem; font-size: .86rem; cursor: pointer; user-select: none; }
+button.primary {
+  appearance: none; border: none; border-radius: 12px; padding: .65rem 1.2rem;
+  background: var(--moss); color: var(--on-moss); font: inherit; font-weight: 700;
+  cursor: pointer; align-self: flex-start;
+}
+button.primary:active { opacity: .85; }
+button.primary.danger { background: var(--rust); color: var(--on-rust); }
+.save-note { font-size: .82rem; color: var(--ink-soft); }
+.save-note.ok { color: var(--moss); }
+
+details.diagnostics { margin-top: 1.6rem; }
+details.diagnostics summary {
+  cursor: pointer; font-weight: 700; font-size: .84rem; color: var(--ink-soft);
+  padding: .3rem 0; list-style: none;
+}
+details.diagnostics summary::-webkit-details-marker { display: none; }
+details.diagnostics summary::before { content: "▸ "; }
+details.diagnostics[open] summary::before { content: "▾ "; }
+.health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: .5rem 1rem; font-size: .82rem; margin-top: .6rem; }
+.health-grid .k { color: var(--ink-soft); }
+.health-grid .v { font-weight: 600; }
+
+footer { text-align: center; color: var(--ink-soft); font-size: .76rem; padding: 1.6rem 1rem .5rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 14c0-4.5 3.5-8 8-8 3 0 4 1.4 4 1.4s3-1.9 5-.4c-1 3-3 3-3 3 .3 1 .3 2 0 3-1 3.5-4 6-8 6-3 0-6-1.6-6-5Z"/>
+      <circle cx="14.3" cy="8.6" r=".6" fill="currentColor" stroke="none"/>
+      <path d="M4 14 1 13"/>
+    </svg>
+    <div class="brand-text">
+      <span class="brand-name">Biomon</span>
+      <span class="brand-station" id="stationName">station</span>
+    </div>
+  </div>
+  <span class="spacer"></span>
+  <span class="pill" id="livePill"><span class="dot"></span><span>connecting…</span></span>
+</header>
+
+<nav class="tabs">
+  <button data-tab="live" class="active">Live</button>
+  <button data-tab="days">Days</button>
+  <button data-tab="species">Species</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+
+<section class="live-spectro" id="liveSpectro">
+  <div class="spectro-toplabel"><span class="live-dot"></span><span>Live audio</span></div>
+  <div class="spectro-canvas-wrap" id="spectroWrap">
+    <div class="spectro-empty" id="spectroEmpty">Listening for audio…</div>
+    <canvas id="spectroCanvas" class="hidden"></canvas>
+  </div>
+  <div class="spectro-axis" id="spectroAxis"></div>
+</section>
+
+<main>
+
+  <!-- ============================== LIVE ============================== -->
+  <section class="panel active" id="panel-live">
+    <div id="healthBanners"></div>
+
+    <div class="summary-bar" id="summaryBar"></div>
+
+    <div class="card latest-card">
+      <button class="spectro-play hidden" id="spectroPlay" aria-label="Play latest capture">
+        <svg id="spectroPlayIcon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <div style="min-width:0;flex:1">
+        <div class="spectro-label">Latest detection</div>
+        <div class="spectro-title" id="spectroTitle">Waiting for audio…</div>
+        <div class="spectro-sub" id="spectroSub"></div>
+      </div>
+      <audio id="spectroAudio" preload="none"></audio>
+    </div>
+
+    <div class="live-toolbar">
+      <div class="search-box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input type="text" id="liveSearch" placeholder="Search species…" autocomplete="off">
+      </div>
+      <div class="seg">
+        <button type="button" class="seg-confirmed active" data-mode="confirmed">Confirmed</button>
+        <button type="button" class="seg-all" data-mode="all">All</button>
+      </div>
+    </div>
+
+    <div class="feed" id="feed"></div>
+    <div class="empty hidden" id="feedEmpty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg>
+      <div>No detections yet today.</div>
+    </div>
+  </section>
+
+  <!-- ============================== DAYS ============================== -->
+  <section class="panel" id="panel-days">
+    <div class="day-picker" id="dayPicker"></div>
+    <div class="summary-bar" id="summaryStats" style="grid-template-columns:repeat(3,1fr)"></div>
+    <div class="card" style="margin-bottom:1rem">
+      <h3 class="serif" style="font-size:.92rem;margin-bottom:.3rem">Detections by hour</h3>
+      <div class="hourchart" id="hourChart"></div>
+      <div class="hour-axis"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
+    </div>
+    <div class="card">
+      <h3 class="serif" style="font-size:.92rem;margin-bottom:.4rem">Top species</h3>
+      <div id="topList"></div>
+      <div class="empty hidden" id="topEmpty">Nothing recorded on this day.</div>
+    </div>
+    <div class="weather-line" id="weatherLine"></div>
+  </section>
+
+  <!-- ============================== SPECIES ============================== -->
+  <section class="panel" id="panel-species">
+    <div class="search-box" style="margin-bottom:1rem">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="text" id="speciesSearch" placeholder="Search all confirmed species…" autocomplete="off">
+    </div>
+    <div class="species-list" id="speciesList"></div>
+    <div class="empty hidden" id="speciesEmpty">No species confirmed yet.</div>
+  </section>
+
+  <!-- ============================== SETTINGS ============================== -->
+  <section class="panel" id="panel-settings">
+    <div class="banner caveat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+      <div>These thresholds are applied <strong>at read time</strong> over rows already stored — moving a slider re-filters instantly and reprocesses nothing. <strong>Retention floor</strong> is the one exception: lowering it only affects <em>future</em> detections, because rows below the old floor were never written and cannot be recovered.</div>
+    </div>
+    <form class="settings-form" id="settingsForm">
+      <div class="field">
+        <label>Display threshold — <span class="value" id="dtVal">0.65</span></label>
+        <input type="range" id="displayThreshold" min="0" max="1" step="0.01">
+        <div class="hint">Confidence a detection needs to show as "confirmed" by default.</div>
+      </div>
+      <div class="field">
+        <label>Retention floor — <span class="value" id="rfVal">0.10</span></label>
+        <input type="range" id="retentionFloor" min="0" max="1" step="0.01">
+        <div class="hint">Nothing below this confidence is stored at all.</div>
+      </div>
+      <div class="field">
+        <label>Repeat required</label>
+        <input type="number" id="repeatRequired" min="1" max="10" step="1">
+        <div class="hint">Same species must be heard this many times in the window below to confirm.</div>
+      </div>
+      <div class="field">
+        <label>Repeat window (minutes)</label>
+        <input type="number" id="repeatWindowMin" min="1" max="1440" step="1">
+      </div>
+      <div class="field">
+        <label class="toggle">
+          <input type="checkbox" id="regionSeasonFilterEnabled"> Region/season filter
+        </label>
+        <div class="hint">Raises the confirmation bar for species off the Danish checklist or outside their usual months (GBIF). Never hides a species outright — just harder to confirm.</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:.8rem">
+        <button type="submit" class="primary">Save</button>
+        <span class="save-note" id="saveNote"></span>
+      </div>
+    </form>
+
+    <details class="diagnostics">
+      <summary>Station diagnostics</summary>
+      <div class="health-grid" id="healthGrid"></div>
+    </details>
+
+    <div class="section-label">Danger zone</div>
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:.8rem;flex-wrap:wrap">
+        <button type="button" class="primary danger" id="clearAllBtn">Clear all data</button>
+        <span class="save-note" id="clearAllNote"></span>
+      </div>
+      <div class="hint" style="margin-top:.5rem">Permanently deletes every detection, clip, and species record on this station. Settings (thresholds, filters) are kept. This cannot be undone.</div>
+    </div>
+  </section>
+
+</main>
+
+<footer id="footer"></footer>
+
+<div class="lightbox" id="lightbox">
+  <button type="button" class="lightbox-close" id="lightboxClose" aria-label="Close">&times;</button>
+  <img id="lightboxImg" src="" alt="">
+</div>
+
+<script>
+"use strict";
+
+/* ---------- tiny utilities ---------- */
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function el(html) {
+  const t = document.createElement("template");
+  t.innerHTML = html.trim();
+  return t.content.firstElementChild;
+}
+async function api(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error(path + " -> " + r.status);
+  return r.json();
+}
+// Common name first, always — a bare binomial is unreadable to anyone but a
+// specialist (project rule, not a preference; mirrors Taxon.display in Model.kt).
+function taxonLabel(t) {
+  return t.common ? `<span class="common">${esc(t.common)}</span><span class="sci">${esc(t.scientific)}</span>`
+                  : `<span class="common">${esc(t.scientific)}</span>`;
+}
+const BIRD_GLYPH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4 14c0-4.5 3.5-8 8-8 3 0 4 1.4 4 1.4s3-1.9 5-.4c-1 3-3 3-3 3 .3 1 .3 2 0 3-1 3.5-4 6-8 6-3 0-6-1.6-6-5Z"/>
+  <circle cx="14.3" cy="8.6" r=".6" fill="currentColor" stroke="none"/></svg>`;
+function avatarHtml(taxon, photo, size) {
+  if (photo && photo.url) {
+    return `<div class="avatar"${size ? ` style="width:${size}px;height:${size}px"` : ""}><img src="${esc(photo.url)}" alt="" loading="lazy"></div>`;
+  }
+  // Never a broken <img> for "no cached photo" — a designed placeholder instead.
+  return `<div class="avatar"${size ? ` style="width:${size}px;height:${size}px"` : ""}>${BIRD_GLYPH}</div>`;
+}
+function relTime(ms) {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+function fmtBytes(b) {
+  if (b == null) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return b.toFixed(i ? 1 : 0) + " " + u[i];
+}
+function fmtDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  if (h >= 24) return Math.floor(h / 24) + "d " + (h % 24) + "h";
+  return h + "h " + m + "m";
+}
+// Confidence is only comparable WITHIN one detector (API.md): BirdNET's 0-1 sigmoid
+// and Orthoptera's raw logit are not the same kind of number. "%" only means
+// something for the former — for anything outside [0,1] it would print nonsense
+// like "291%", so those render as a bare score instead, never invented as a percent.
+function fmtScore(v) {
+  return (v >= 0 && v <= 1) ? Math.round(v * 100) + "%" : v.toFixed(2);
+}
+function localDate(ms) {
+  const d = new Date(ms);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+function fmtClock(ms) {
+  const d = new Date(ms);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+/* ---------- tabs ---------- */
+document.querySelectorAll("nav.tabs button").forEach(btn => {
+  btn.addEventListener("click", () => selectTab(btn.dataset.tab));
+});
+function selectTab(name) {
+  document.querySelectorAll("nav.tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "panel-" + name));
+  document.getElementById("liveSpectro").classList.toggle("hidden", name !== "live");
+  location.hash = name;
+  if (name === "days" && !state.daysLoaded) loadDays();
+  if (name === "species" && !state.speciesLoaded) loadSpecies();
+  if (name === "settings" && !state.settingsLoaded) loadSettings();
+}
+selectTab((location.hash || "#live").slice(1));
+
+/* ---------- lightbox: tap any species photo to see it larger ---------- */
+function closeLightbox() {
+  document.getElementById("lightbox").classList.remove("open");
+  document.getElementById("lightboxImg").src = "";
+}
+document.addEventListener("click", e => {
+  const img = e.target.closest(".avatar img");
+  if (!img) return;
+  document.getElementById("lightboxImg").src = img.src;
+  document.getElementById("lightbox").classList.add("open");
+});
+document.getElementById("lightbox").addEventListener("click", e => {
+  if (e.target.id === "lightbox" || e.target.id === "lightboxClose") closeLightbox();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") closeLightbox();
+});
+
+/* ---------- shared state ---------- */
+const state = {
+  cursorMs: 0,          // next since_ms; always the SERVER's clock, never ours —
+                          // the browser and the station are different machines and a
+                          // skewed client clock would silently skip or repeat rows.
+  seenIds: new Set(),
+  showCandidates: false,
+  searchQuery: "",
+  daysLoaded: false, speciesLoaded: false, settingsLoaded: false,
+  selectedDate: null,
+  settings: null,
+  health: null,
+  todaySummary: null,
+  spectroLoadedFor: null,
+};
+
+/* ---------- live: health ---------- */
+function renderHealth(h) {
+  state.health = h;
+  document.getElementById("stationName").textContent = h.station.name || h.station.id;
+  const pill = document.getElementById("livePill");
+  if (h.listening) {
+    pill.className = "pill good"; pill.querySelector("span:last-child").textContent = "listening";
+  } else {
+    pill.className = "pill bad"; pill.querySelector("span:last-child").textContent = "not listening";
+  }
+
+  const banners = document.getElementById("healthBanners");
+  banners.innerHTML = "";
+  if (!h.listening) {
+    banners.appendChild(el(`<div class="banner bad">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 9v4M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg>
+      <div><strong>Not listening.</strong> The station has stopped capturing audio. It has restarted ${h.restarts} time(s) since first install.</div></div>`));
+  }
+  if (h.thermal && h.thermal.throttled) {
+    // The station's OWN decision to slow inference, not the OS's — stated plainly,
+    // and in the caveat colour (not error red): this is a deliberate trade-off.
+    banners.appendChild(el(`<div class="banner caveat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+      <div><strong>Thermally throttled.</strong> Inference has been slowed deliberately (battery ${h.thermal.battery_c.toFixed(1)}°C, status ${esc(h.thermal.status)}).</div></div>`));
+  }
+
+  const pct = h.storage.cap_bytes ? Math.round(100 * h.storage.clips_bytes / h.storage.cap_bytes) : 0;
+  const grid = document.getElementById("healthGrid");
+  grid.innerHTML = [
+    ["Uptime", fmtDuration(h.uptime_ms)],
+    ["Model", esc(h.model.name) + " " + esc(h.model.version) + (h.model.loaded ? "" : " (not loaded)")],
+    ["Inference", h.inference.mean_ms + " ms · " + h.inference.duty_pct.toFixed(1) + "% duty"],
+    ["Clips stored", h.storage.clips + " · " + fmtBytes(h.storage.clips_bytes) + " (" + pct + "%)"],
+    ["Free space", fmtBytes(h.storage.free_bytes)],
+    ["Queue", h.queue.pending + " pending"],
+  ].map(([k, v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+
+  if (state.settings === null) state.settings = h.settings;
+  renderSummaryBar();
+}
+
+/* ---------- live: summary bar ---------- */
+const ICON_CLOCK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>`;
+const ICON_LEAF = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20c9 0 14-5 14-14 0-1 0-2-.2-2.8C10 4 5 9 5 18v2Z"/><path d="M5 20c2-6 5-9 10-12"/></svg>`;
+const ICON_WAVE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h3l2-7 3 14 3-10 2 6h3l2-4"/></svg>`;
+const ICON_PIN = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-6.4 7-12a7 7 0 1 0-14 0c0 5.6 7 12 7 12Z"/><circle cx="12" cy="9" r="2.4"/></svg>`;
+const ICON_CLOUD = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .5-7.97A5.5 5.5 0 0 0 7.1 9.1 4 4 0 0 0 7 18Z"/></svg>`;
+function sumItem(icon, n, l) {
+  return `<div class="sum-item">${icon}<div><div class="sum-n">${esc(n)}</div><div class="sum-l">${esc(l)}</div></div></div>`;
+}
+function renderSummaryBar() {
+  const h = state.health, s = state.todaySummary;
+  const items = [];
+  items.push(sumItem(ICON_CLOCK, h ? fmtDuration(h.uptime_ms) : "—", "uptime"));
+  items.push(sumItem(ICON_LEAF, s ? s.species_count : "—", "species today"));
+  items.push(sumItem(ICON_WAVE, s ? s.detection_count : "—", "detections today"));
+  items.push(sumItem(ICON_PIN, (h && h.station.name) || "—", "location"));
+  if (s && s.weather) {
+    items.push(sumItem(ICON_CLOUD, Math.round(s.weather.temperature_c) + "°C", "wind " + s.weather.wind_ms + " m/s"));
+  }
+  document.getElementById("summaryBar").innerHTML = items.join("");
+}
+async function loadTodaySummary() {
+  try {
+    state.todaySummary = await api(`/api/summary?date=${localDate(Date.now())}`);
+    renderSummaryBar();
+  } catch (e) { /* LAN hiccup — next tick retries */ }
+}
+
+/* ---------- live: rolling spectrogram, computed client-side. Every ~1.5s (the
+   station's own hop — AudioCapture.kt) we poll /api/live-audio for the freshest 3s
+   window of RAW ambient audio (not a stored detection clip — ambient audio never
+   clears the retention floor most of the time), take just the newest hop's worth of
+   it, and scroll that onto a persistent canvas — a real waterfall, not a repaint of
+   one clip. FFT is the same iterative radix-2 Cooley-Tukey the phone app's own
+   SpectrogramStrip uses, ported to JS so the two "read" the same way. ---------- */
+const FFT_SIZE = 1024, FFT_HALF = FFT_SIZE / 2;
+const HANN = (() => {
+  const w = new Float32Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) w[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (FFT_SIZE - 1));
+  return w;
+})();
+function fftRadix2(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j |= bit;
+    if (i < j) {
+      let t = re[i]; re[i] = re[j]; re[j] = t;
+      t = im[i]; im[i] = im[j]; im[j] = t;
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let curR = 1, curI = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const uR = re[i + k], uI = im[i + k];
+        const vR = re[i + k + len / 2] * curR - im[i + k + len / 2] * curI;
+        const vI = re[i + k + len / 2] * curI + im[i + k + len / 2] * curR;
+        re[i + k] = uR + vR; im[i + k] = uI + vI;
+        re[i + k + len / 2] = uR - vR; im[i + k + len / 2] = uI - vI;
+        const nR = curR * wr - curI * wi;
+        curI = curR * wi + curI * wr; curR = nR;
+      }
+    }
+  }
+}
+function readTag(dv, off) { return String.fromCharCode(dv.getUint8(off), dv.getUint8(off + 1), dv.getUint8(off + 2), dv.getUint8(off + 3)); }
+// Parses exactly what StationService.writeWav produces: 44-byte header, PCM16 LE.
+// Walking the chunk list rather than assuming the fixed offset costs nothing and
+// survives a future header change on the write side.
+function parseWav(buf) {
+  const dv = new DataView(buf);
+  if (readTag(dv, 0) !== "RIFF" || readTag(dv, 8) !== "WAVE") return null;
+  let offset = 12, sampleRate = 48000, numChannels = 1, dataOffset = -1, dataLen = 0;
+  while (offset + 8 <= dv.byteLength) {
+    const id = readTag(dv, offset);
+    const size = dv.getUint32(offset + 4, true);
+    if (id === "fmt ") {
+      numChannels = dv.getUint16(offset + 10, true);
+      sampleRate = dv.getUint32(offset + 12, true);
+    } else if (id === "data") {
+      dataOffset = offset + 8; dataLen = size;
+    }
+    offset += 8 + size + (size % 2);
+  }
+  if (dataOffset < 0) return null;
+  const n = Math.floor(dataLen / 2 / numChannels);
+  const samples = new Float32Array(n);
+  for (let i = 0; i < n; i++) samples[i] = dv.getInt16(dataOffset + i * 2 * numChannels, true) / 32768;
+  return { samples, sampleRate };
+}
+// matplotlib's "magma" colormap, sampled at 9 stops — dark purple/black for
+// silence through red-orange for mid-energy to pale yellow for peaks, same
+// family BirdNET Live uses instead of a flat monochrome ramp.
+const MAGMA_STOPS = [
+  [0, 0, 4], [20, 14, 54], [64, 15, 110], [106, 23, 110],
+  [147, 38, 103], [196, 55, 87], [233, 88, 61], [245, 156, 47], [252, 253, 191],
+];
+function magmaColor(t) {
+  t = Math.min(1, Math.max(0, t));
+  const x = t * (MAGMA_STOPS.length - 1);
+  const i = Math.min(MAGMA_STOPS.length - 2, Math.floor(x));
+  const f = x - i, a = MAGMA_STOPS[i], b = MAGMA_STOPS[i + 1];
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+}
+function buildSpectrogramOffscreen(mono, sampleRate, cols, rows, maxHz, floorDb) {
+  const n = mono.length;
+  const step = Math.max(1, (n - FFT_SIZE) / cols);
+  const mags = new Array(cols);
+  let peak = 1e-9;
+  const re = new Float32Array(FFT_SIZE), im = new Float32Array(FFT_SIZE);
+  for (let c = 0; c < cols; c++) {
+    const off = Math.min(Math.max(0, Math.round(c * step)), Math.max(0, n - FFT_SIZE));
+    for (let i = 0; i < FFT_SIZE; i++) { re[i] = (mono[off + i] || 0) * HANN[i]; im[i] = 0; }
+    fftRadix2(re, im);
+    const m = new Float32Array(FFT_HALF);
+    for (let k = 0; k < FFT_HALF; k++) { const mm = Math.hypot(re[k], im[k]); m[k] = mm; if (mm > peak) peak = mm; }
+    mags[c] = m;
+  }
+  const nyquist = sampleRate / 2;
+  const topBin = Math.min(FFT_HALF, Math.max(8, Math.round(maxHz / nyquist * FFT_HALF)));
+  const off = document.createElement("canvas");
+  off.width = cols; off.height = rows;
+  const octx = off.getContext("2d");
+  const img = octx.createImageData(cols, rows);
+  for (let y = 0; y < rows; y++) {
+    // y = 0 is the top of the image = the HIGHEST frequency; quadratic spacing so
+    // the low end (where most bird calls live) isn't squeezed into a couple of rows.
+    const frac = 1 - y / Math.max(1, rows - 1);
+    const lo = Math.min(topBin - 1, Math.floor(frac * frac * topBin));
+    const hiFrac = frac + 1 / rows;
+    const hi = Math.max(lo + 1, Math.min(topBin, Math.floor(hiFrac * hiFrac * topBin)));
+    for (let x = 0; x < cols; x++) {
+      let acc = 0, cnt = 0;
+      const m = mags[x];
+      for (let k = lo; k < hi && k < FFT_HALF; k++) { acc += m[k]; cnt++; }
+      const v = cnt > 0 ? acc / cnt : 0;
+      const db = 20 * Math.log10(Math.max(v / peak, 1e-9));
+      const t = Math.min(1, Math.max(0, (db - floorDb) / -floorDb));
+      const [r, g, b] = magmaColor(t);
+      const idx = (y * cols + x) * 4;
+      img.data[idx] = r; img.data[idx + 1] = g; img.data[idx + 2] = b; img.data[idx + 3] = 255;
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  return off;
+}
+// Resizes the visible canvas's backing store to match its laid-out CSS size.
+// Guarded so it only touches width/height (which clears the canvas) when the
+// size actually changed — this runs every animation frame, and clearing on every
+// frame for no reason would be wasted work. Self-heals if the canvas's first
+// layout pass (e.g. before the Live tab is ever shown) landed at 0x0.
+function sizeSpectroCanvasIfNeeded() {
+  const canvas = document.getElementById("spectroCanvas");
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(rect.width * dpr));
+  const h = Math.max(1, Math.round(rect.height * dpr));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+}
+
+// mirrors AudioCapture.kt's WINDOW_S/HOP_S — the station always captures at these,
+// it is not something the API negotiates per-request.
+const AUDIO_WINDOW_S = 3.0, AUDIO_HOP_S = 1.5;
+const ROLL_ROWS = 90, ROLL_SECONDS = 24, ROLL_COLS = 220;
+const ROLL_NEW_COLS = Math.max(1, Math.round(ROLL_COLS * (AUDIO_HOP_S / ROLL_SECONDS)));
+// The offscreen buffer holds one extra hop of history beyond what's ever shown at
+// rest — that spare hop is what lets the render loop below interpolate a smooth
+// scroll between polls instead of jumping straight to the new column each time.
+const ROLL_BUFFER_COLS = ROLL_COLS + ROLL_NEW_COLS;
+const SPECTRO_MAX_HZ = 10000, SPECTRO_FLOOR_DB = -75;
+
+function makeBlankRollCanvas() {
+  const c = document.createElement("canvas");
+  c.width = ROLL_BUFFER_COLS; c.height = ROLL_ROWS;
+  c.getContext("2d").fillRect(0, 0, ROLL_BUFFER_COLS, ROLL_ROWS);
+  return c;
+}
+// Appends just the NEWEST hop's worth of a 3s window onto the persistent rolling
+// canvas — the window overlaps the previous poll by half, so only the tail is new
+// audio; scrolling in the whole 3s every poll would double-draw what we already drew.
+function appendLiveWindow(mono, sampleRate, windowMs) {
+  const newSampleCount = Math.round(mono.length * (AUDIO_HOP_S / AUDIO_WINDOW_S));
+  const tail = mono.subarray(mono.length - newSampleCount);
+  const slice = buildSpectrogramOffscreen(tail, sampleRate, ROLL_NEW_COLS, ROLL_ROWS, SPECTRO_MAX_HZ, SPECTRO_FLOOR_DB);
+  if (!state.rollCanvas) state.rollCanvas = makeBlankRollCanvas();
+  const ctx = state.rollCanvas.getContext("2d");
+  ctx.drawImage(state.rollCanvas, ROLL_NEW_COLS, 0, ROLL_BUFFER_COLS - ROLL_NEW_COLS, ROLL_ROWS, 0, 0, ROLL_BUFFER_COLS - ROLL_NEW_COLS, ROLL_ROWS);
+  ctx.drawImage(slice, ROLL_BUFFER_COLS - ROLL_NEW_COLS, 0);
+  document.getElementById("spectroEmpty").classList.add("hidden");
+  document.getElementById("spectroCanvas").classList.remove("hidden");
+  // Marks "now" for the render loop's interpolation and the axis below — both key
+  // off wall-clock time, never a frame count, so a stalled tab catches up correctly.
+  state.lastHopAt = performance.now();
+  updateSpectroAxis(windowMs || Date.now());
+}
+// Runs every animation frame regardless of polling cadence. Each poll only moves
+// the offscreen buffer by one hop (ROLL_NEW_COLS, a discrete jump); rather than
+// blitting that straight to the screen, this samples a source rect that slides
+// from the buffer's OLD window to its NEW one over the hop's real duration, so the
+// waterfall reads as continuous motion instead of stepping once every ~1.5s.
+function renderSpectroLoop() {
+  requestAnimationFrame(renderSpectroLoop);
+  if (!state.rollCanvas) return;
+  if (document.getElementById("liveSpectro").classList.contains("hidden")) return;
+  sizeSpectroCanvasIfNeeded();
+  const canvas = document.getElementById("spectroCanvas");
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  const elapsedMs = state.lastHopAt ? performance.now() - state.lastHopAt : AUDIO_HOP_S * 1000;
+  const frac = Math.min(1, Math.max(0, elapsedMs / (AUDIO_HOP_S * 1000)));
+  const sourceX = ROLL_NEW_COLS * frac;
+  ctx.drawImage(state.rollCanvas, sourceX, 0, ROLL_COLS, ROLL_ROWS, 0, 0, canvas.width, canvas.height);
+}
+function fmtClockSec(ms) {
+  const d = new Date(ms);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + ":" + String(d.getSeconds()).padStart(2, "0");
+}
+// Ticks along the bottom of the waterfall, labelled with the SERVER's clock (the
+// window timestamp from the audio poll) — same reasoning as state.cursorMs: the
+// browser and the station are different machines with potentially skewed clocks.
+function updateSpectroAxis(nowMs) {
+  const TICKS = 5;
+  const labels = [];
+  for (let i = 0; i < TICKS; i++) {
+    const t = nowMs - ROLL_SECONDS * 1000 * (1 - i / (TICKS - 1));
+    labels.push(`<span>${fmtClockSec(t)}</span>`);
+  }
+  document.getElementById("spectroAxis").innerHTML = labels.join("");
+}
+async function pollLiveAudio() {
+  try {
+    const r = await fetch("/api/live-audio", { cache: "no-store" });
+    if (!r.ok) return;   // 404 until the station's first window lands — stay quiet, next tick retries
+    const windowMs = parseInt(r.headers.get("X-Window-Ms") || "0", 10);
+    if (windowMs && windowMs === state.lastLiveWindowMs) return;   // no new window since last poll
+    const buf = await r.arrayBuffer();
+    const parsed = parseWav(buf);
+    if (!parsed) return;
+    state.lastLiveWindowMs = windowMs;
+    appendLiveWindow(parsed.samples, parsed.sampleRate, windowMs);
+  } catch (e) { /* LAN hiccup — next tick retries */ }
+}
+
+// The panel's title/sub still track the latest DETECTION (a named species), separate
+// from the always-on ambient waterfall above — updated from SSE/poll, not from the
+// live-audio tick.
+function updateLatestDetectionPanel(d) {
+  if (state.spectroLoadedFor === d.id) return;
+  state.spectroLoadedFor = d.id;
+  document.getElementById("spectroTitle").innerHTML = taxonLabel(d.taxon);
+  document.getElementById("spectroSub").textContent = fmtClock(d.detected_at_ms) + " · " + fmtScore(d.confidence);
+  const audio = document.getElementById("spectroAudio");
+  audio.pause();
+  if (d.clip) audio.src = d.clip.url; else audio.removeAttribute("src");
+  setSpectroPlaying(false);
+  document.getElementById("spectroPlay").classList.toggle("hidden", !d.clip);
+}
+function setSpectroPlaying(playing) {
+  document.getElementById("spectroPlayIcon").outerHTML = playing
+    ? `<svg id="spectroPlayIcon" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>`
+    : `<svg id="spectroPlayIcon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`;
+}
+document.getElementById("spectroPlay").addEventListener("click", () => {
+  const audio = document.getElementById("spectroAudio");
+  if (!audio.src) return;
+  if (audio.paused) audio.play().catch(() => {}); else audio.pause();
+});
+document.getElementById("spectroAudio").addEventListener("play", () => setSpectroPlaying(true));
+document.getElementById("spectroAudio").addEventListener("pause", () => setSpectroPlaying(false));
+document.getElementById("spectroAudio").addEventListener("ended", () => setSpectroPlaying(false));
+
+/* ---------- live: feed ---------- */
+function plausibilityBadges(d) {
+  const bits = [];
+  if (d.regional === false) bits.push(`<span class="tag plausibility" title="Not on the Danish checklist">off-list</span>`);
+  if (d.in_season === false) bits.push(`<span class="tag plausibility" title="Outside this species' usual months, going by GBIF Danish records">off-season</span>`);
+  return bits.join(" ");
+}
+function detRowHtml(d, isNew) {
+  const photo = d.photo;
+  const clip = d.clip;
+  const today = localDate(Date.now());
+  const dateBit = localDate(d.detected_at_ms) !== today
+    ? `<span class="d">${esc(new Date(d.detected_at_ms).toLocaleDateString(undefined, { month: "short", day: "numeric" }))}</span>` : "";
+  return `<div class="row ${d.state}${isNew ? " is-new" : ""}" data-id="${d.id}" data-taxon-key="${esc(d.taxon.key)}"
+      data-search="${esc(((d.taxon.common || "") + " " + d.taxon.scientific).toLowerCase())}">
+    <div class="row-summary">
+      <div class="row-time"><span class="t">${fmtClock(d.detected_at_ms)}</span>${dateBit}</div>
+      ${avatarHtml(d.taxon, photo)}
+      <div class="row-main">
+        <div class="row-name taxon-name">${taxonLabel(d.taxon)}</div>
+        <div class="row-sub">
+          ${d.state === "candidate" ? `<span class="tag">candidate</span>` : ""}
+          ${plausibilityBadges(d)}
+          ${d.repeat_count > 1 ? `<span class="tag">&times;${d.repeat_count}</span>` : ""}
+        </div>
+      </div>
+      <div class="row-conf ${d.state}">${fmtScore(d.confidence)}</div>
+      <svg class="row-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+    </div>
+    <div class="row-detail">
+      <div class="row-detail-inner">
+        ${clip ? `<audio controls preload="none" src="${esc(clip.url)}"></audio>` : `<span class="clip-none">clip not available</span>`}
+        <div class="row-detail-meta">
+          <span>${relTime(d.detected_at_ms)}</span>
+        </div>
+        <div class="threshold-actions">
+          <div class="bump-row">
+            <button type="button" class="bump" data-delta="0.05" title="Raise the confidence bar for ${esc(d.taxon.common || d.taxon.scientific)}.">False positive? +5%</button>
+            <button type="button" class="bump" data-delta="0.10">+10%</button>
+          </div>
+          <span class="bump-note"></span>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+async function bumpSpeciesThreshold(taxonKey, delta, label, noteEl) {
+  noteEl.textContent = "…"; noteEl.className = "bump-note";
+  try {
+    const r = await fetch(`/api/species/${encodeURIComponent(taxonKey)}/threshold`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ delta }),
+    });
+    if (!r.ok) throw new Error("request failed");
+    const out = await r.json();
+    noteEl.textContent = `${label} now needs ${fmtScore(out.threshold_override)}+`;
+    noteEl.className = "bump-note ok";
+  } catch (e) {
+    noteEl.textContent = "Failed to save — station unreachable.";
+    noteEl.className = "bump-note";
+  }
+  setTimeout(() => { noteEl.textContent = ""; noteEl.className = "bump-note"; }, 5000);
+}
+document.getElementById("feed").addEventListener("click", e => {
+  const bump = e.target.closest("button.bump");
+  if (bump) {
+    const row = bump.closest(".row");
+    const taxonKey = row.dataset.taxonKey;
+    const label = row.querySelector(".row-name .common")?.textContent || taxonKey;
+    const noteEl = row.querySelector(".bump-note");
+    bumpSpeciesThreshold(taxonKey, parseFloat(bump.dataset.delta), label, noteEl);
+    return;
+  }
+  if (e.target.closest("audio")) return;   // let native audio controls work untouched
+  const summary = e.target.closest(".row-summary");
+  if (summary) summary.closest(".row").classList.toggle("expanded");
+});
+function passesFilter(d) {
+  return state.showCandidates || d.state === "confirmed";
+}
+function matchesSearch(searchAttr) {
+  return !state.searchQuery || searchAttr.includes(state.searchQuery);
+}
+function prependDetection(d, isNew) {
+  updateLatestDetectionPanel(d);
+  if (state.seenIds.has(d.id)) return;
+  state.seenIds.add(d.id);
+  if (!passesFilter(d)) return;
+  const feed = document.getElementById("feed");
+  const row = el(detRowHtml(d, isNew));
+  if (!matchesSearch(row.dataset.search)) row.classList.add("search-hidden");
+  feed.insertBefore(row, feed.firstChild);
+  document.getElementById("feedEmpty").classList.add("hidden");
+  // Keep the DOM bounded — this is a live wall display, not an archive browser.
+  while (feed.children.length > 150) feed.removeChild(feed.lastChild);
+}
+document.querySelectorAll(".seg button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".seg button").forEach(b => b.classList.toggle("active", b === btn));
+    state.showCandidates = btn.dataset.mode === "all";
+    document.getElementById("feed").innerHTML = "";
+    state.seenIds.clear();
+    loadInitialFeed();
+  });
+});
+document.getElementById("liveSearch").addEventListener("input", e => {
+  state.searchQuery = e.target.value.trim().toLowerCase();
+  document.querySelectorAll("#feed .row").forEach(row => {
+    row.classList.toggle("search-hidden", !matchesSearch(row.dataset.search));
+  });
+});
+
+async function loadInitialFeed() {
+  const st = state.showCandidates ? "all" : "confirmed";
+  const data = await api(`/api/detections?state=${st}&limit=80`);
+  state.cursorMs = Math.max(state.cursorMs, data.server_ms);
+  const feed = document.getElementById("feed");
+  feed.innerHTML = "";
+  // API returns newest-first already.
+  for (const d of data.detections) {
+    state.seenIds.add(d.id);
+    const row = el(detRowHtml(d, false));
+    if (!matchesSearch(row.dataset.search)) row.classList.add("search-hidden");
+    feed.appendChild(row);
+  }
+  document.getElementById("feedEmpty").classList.toggle("hidden", data.detections.length > 0);
+  if (data.detections.length) updateLatestDetectionPanel(data.detections[0]);
+}
+
+async function pollDetections() {
+  try {
+    const data = await api(`/api/detections?since_ms=${state.cursorMs}&state=all&limit=100`);
+    state.cursorMs = Math.max(state.cursorMs, data.server_ms);
+    // Oldest-of-the-batch first, so prepending each in turn keeps overall newest-first.
+    for (const d of data.detections.slice().reverse()) prependDetection(d, true);
+  } catch (e) { /* network hiccup on a LAN box — next tick will catch up */ }
+}
+
+/* ---------- SSE, with a polling fallback per API.md §"GET /api/events" ---------- */
+let es = null;
+function connectSSE() {
+  try { es = new EventSource("/api/events"); } catch (e) { return; }
+  es.addEventListener("hello", ev => {
+    const d = JSON.parse(ev.data);
+    state.cursorMs = Math.max(state.cursorMs, d.server_ms);
+  });
+  es.addEventListener("status", ev => renderHealth(JSON.parse(ev.data)));
+  es.addEventListener("detection", ev => {
+    const d = JSON.parse(ev.data);
+    state.cursorMs = Math.max(state.cursorMs, d.detected_at_ms);
+    prependDetection(d, true);
+    loadTodaySummary();
+  });
+  es.onerror = () => { /* EventSource retries on its own; the interval poll below
+                           is the belt-and-suspenders path if it never recovers */ };
+}
+
+async function healthLoop() {
+  try { renderHealth(await api("/api/health")); } catch (e) { /* ignore, try again */ }
+}
+
+/* ---------- days ---------- */
+async function loadDays() {
+  state.daysLoaded = true;
+  const data = await api("/api/days");
+  state.selectedDate = state.selectedDate || data.today;
+  const picker = document.getElementById("dayPicker");
+  picker.innerHTML = "";
+  const days = data.days.some(d => d.date === data.today) ? data.days
+             : [{ date: data.today, detection_count: 0, species_count: 0 }, ...data.days];
+  for (const day of days) {
+    const chip = el(`<button class="day-chip${day.date === state.selectedDate ? " active" : ""}">
+      <div class="d">${day.date === data.today ? "Today" : day.date.slice(5)}</div>
+      <div class="n">${day.detection_count} · ${day.species_count} sp</div></button>`);
+    chip.addEventListener("click", () => { state.selectedDate = day.date; loadDaySummary(); loadDays(); });
+    picker.appendChild(chip);
+  }
+  loadDaySummary();
+}
+
+async function loadDaySummary() {
+  const s = await api(`/api/summary?date=${state.selectedDate}`);
+  document.getElementById("summaryStats").innerHTML = [
+    [ICON_LEAF, s.species_count, "species"],
+    [ICON_WAVE, s.detection_count, "detections"],
+    [ICON_PIN, s.most_active ? (s.most_active.taxon.common || s.most_active.taxon.scientific) : "—", "most active"],
+  ].map(([icon, n, l]) => sumItem(icon, n, l)).join("");
+
+  const max = Math.max(1, ...s.by_hour);
+  document.getElementById("hourChart").innerHTML = s.by_hour.map(c =>
+    `<div class="bar" data-count="${c}" style="height:${Math.max(2, Math.round(100 * c / max))}%" title="${c} detection${c === 1 ? "" : "s"}"></div>`
+  ).join("");
+
+  const list = document.getElementById("topList");
+  list.innerHTML = s.top.map(row => `<div class="mini-row">
+      ${avatarHtml(row.taxon, null, 38)}
+      <div class="taxon-name">${taxonLabel(row.taxon)}</div>
+      <div class="mini-stats"><div class="n">${row.count}&times; · ${fmtScore(row.best_confidence)}</div><div>${relTime(row.last_ms)}</div></div>
+    </div>`).join("");
+  document.getElementById("topEmpty").classList.toggle("hidden", s.top.length > 0);
+
+  const wl = document.getElementById("weatherLine");
+  if (s.weather) {
+    wl.innerHTML = `<span>${s.weather.temperature_c}°C</span><span>wind ${s.weather.wind_ms} m/s</span><span>cloud ${s.weather.cloud_pct}%</span><span style="color:var(--ink-soft)">via ${esc(s.weather.source)}</span>`;
+  } else {
+    // Weather needs the internet and the station must work without it — absence is
+    // expected, not an error, so this stays quiet rather than showing a warning.
+    wl.innerHTML = `<span style="font-style:italic">weather unavailable</span>`;
+  }
+}
+
+/* ---------- species ---------- */
+let allSpecies = [];
+async function loadSpecies() {
+  state.speciesLoaded = true;
+  const data = await api("/api/species");
+  allSpecies = data.species;
+  renderSpeciesList();
+}
+function renderSpeciesList() {
+  const q = document.getElementById("speciesSearch").value.trim().toLowerCase();
+  const filtered = !q ? allSpecies : allSpecies.filter(sp =>
+    ((sp.taxon.common || "") + " " + sp.taxon.scientific).toLowerCase().includes(q));
+  const list = document.getElementById("speciesList");
+  list.innerHTML = filtered.map(sp => `<div class="sp-row">
+      ${avatarHtml(sp.taxon, sp.photo, 54)}
+      <div style="min-width:0">
+        <div class="taxon-name">${taxonLabel(sp.taxon)}</div>
+        <div class="sp-stats">${sp.count} seen · best ${fmtScore(sp.best_confidence)} · ${relTime(sp.last_ms)}</div>
+      </div>
+    </div>`).join("");
+  document.getElementById("speciesEmpty").classList.toggle("hidden", filtered.length > 0 || allSpecies.length === 0);
+}
+document.getElementById("speciesSearch").addEventListener("input", renderSpeciesList);
+
+/* ---------- settings ---------- */
+async function loadSettings() {
+  state.settingsLoaded = true;
+  const s = await api("/api/settings");
+  applySettingsToForm(s);
+}
+function applySettingsToForm(s) {
+  document.getElementById("displayThreshold").value = s.display_threshold;
+  document.getElementById("dtVal").textContent = s.display_threshold.toFixed(2);
+  document.getElementById("retentionFloor").value = s.retention_floor;
+  document.getElementById("rfVal").textContent = s.retention_floor.toFixed(2);
+  document.getElementById("repeatRequired").value = s.repeat_required;
+  document.getElementById("repeatWindowMin").value = s.repeat_window_min;
+  document.getElementById("regionSeasonFilterEnabled").checked = s.region_season_filter_enabled;
+}
+document.getElementById("displayThreshold").addEventListener("input", e =>
+  document.getElementById("dtVal").textContent = parseFloat(e.target.value).toFixed(2));
+document.getElementById("retentionFloor").addEventListener("input", e =>
+  document.getElementById("rfVal").textContent = parseFloat(e.target.value).toFixed(2));
+
+document.getElementById("settingsForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const patch = {
+    display_threshold: parseFloat(document.getElementById("displayThreshold").value),
+    retention_floor: parseFloat(document.getElementById("retentionFloor").value),
+    repeat_required: parseInt(document.getElementById("repeatRequired").value, 10),
+    repeat_window_min: parseInt(document.getElementById("repeatWindowMin").value, 10),
+    region_season_filter_enabled: document.getElementById("regionSeasonFilterEnabled").checked,
+  };
+  const note = document.getElementById("saveNote");
+  try {
+    const r = await fetch("/api/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
+    });
+    const out = await r.json();
+    applySettingsToForm(out);
+    state.settings = out;
+    note.textContent = "Saved."; note.className = "save-note ok";
+  } catch (err) {
+    note.textContent = "Save failed — station unreachable."; note.className = "save-note";
+  }
+  setTimeout(() => note.textContent = "", 3000);
+});
+
+document.getElementById("clearAllBtn").addEventListener("click", async () => {
+  const note = document.getElementById("clearAllNote");
+  if (!confirm("Delete every detection, clip, and species record on this station? This cannot be undone.")) return;
+  note.textContent = "Clearing…"; note.className = "save-note";
+  try {
+    const r = await fetch("/api/data", { method: "DELETE" });
+    if (!r.ok) throw new Error("request failed");
+    note.textContent = "Cleared."; note.className = "save-note ok";
+    state.seenIds.clear(); state.cursorMs = 0; state.daysLoaded = false; state.speciesLoaded = false;
+    state.selectedDate = null; state.spectroLoadedFor = null; allSpecies = [];
+    document.getElementById("feed").innerHTML = "";
+    document.getElementById("feedEmpty").classList.remove("hidden");
+    document.getElementById("spectroTitle").textContent = "Waiting for audio…";
+    document.getElementById("spectroSub").textContent = "";
+    document.getElementById("spectroAudio").removeAttribute("src");
+    document.getElementById("spectroPlay").classList.add("hidden");
+    await loadInitialFeed();
+    await loadTodaySummary();
+  } catch (e) {
+    note.textContent = "Failed — station unreachable."; note.className = "save-note";
+  }
+  setTimeout(() => note.textContent = "", 4000);
+});
+
+/* ---------- boot ---------- */
+(async function init() {
+  try { renderHealth(await api("/api/health")); } catch (e) {}
+  await loadInitialFeed();
+  await loadTodaySummary();
+  connectSSE();
+  requestAnimationFrame(renderSpectroLoop);
+  pollLiveAudio();
+  setInterval(pollLiveAudio, 1000);     // faster than the station's own 1.5s hop, so no window is missed
+  setInterval(pollDetections, 20000);   // fallback path; SSE over a phone hotspot
+  setInterval(healthLoop, 20000);       // survives less well than a plain GET (API.md)
+  setInterval(loadTodaySummary, 60000);
+})();
+</script>
+</body>
+</html>
