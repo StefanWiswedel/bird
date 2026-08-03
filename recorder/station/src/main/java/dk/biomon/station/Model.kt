@@ -134,8 +134,41 @@ data class Detection(
 data class Settings(
     val displayThreshold: Float = 0.65f,
     val retentionFloor: Float = 0.10f,
+    /**
+     * Confidence a window must reach before its AUDIO is kept. Deliberately SEPARATE from
+     * [retentionFloor], because the two govern costs that differ by three orders of
+     * magnitude: a detection row is ~358 bytes, and the 3 s clip beside it was 288,000.
+     *
+     * Measured on the 19 h corpus of 2026-08-02/03: at a single 0.10 floor the station
+     * wrote 5,022 clips in 19 hours — 667 GB/year, against 908 MB/year of rows — and the
+     * 8 GB cap therefore held FOUR DAYS of audio. Raising only the clip floor to 0.50
+     * keeps 266 of those clips and takes the same cap to ~83 days, without discarding a
+     * single row.
+     *
+     * The asymmetry is the point. Rows are cheap and unrecoverable (nothing can re-derive
+     * them once the audio is gone), so they stay at 0.10 where a slider can still
+     * re-filter them and where the §8 co-occurrence hypothesis remains testable — every
+     * one of its 12 multi-species windows sits below 0.41. Clips are expensive and largely
+     * redundant with the row that describes them, and nobody verifies a 0.2 candidate by
+     * ear. So: keep every row, keep audio only where a human might actually listen.
+     */
+    val clipFloor: Float = 0.50f,
     val repeatRequired: Int = 2,
     val repeatWindowMin: Int = 30,
+    /**
+     * Seconds of silence that must separate two detections before they count as separate
+     * BOUTS. This is the fix for the rule that let a 19-window noise event through.
+     *
+     * The old rule counted detections, and at a 3.0 s window on a 1.5 s hop consecutive
+     * detections share half their audio — so "twice in 30 minutes" was satisfied by one
+     * continuous sound lasting three seconds. Measured: of 13 rows over threshold it
+     * rejected 2, and 30 of 47 Spotted Crake gaps were exactly 1.5 s, i.e. the hop.
+     *
+     * A gap requirement states the rule about the ANIMAL instead of about the analysis
+     * window: it called, it stopped, and it called again a minute later. A machine that
+     * runs continuously produces one bout no matter how long it runs.
+     */
+    val boutGapSeconds: Int = 60,
     /** Whether out-of-region / out-of-season taxa get an automatic threshold penalty
      *  (Database.effectiveThreshold). A species with an explicit per-species override
      *  (the `species_settings` table, set via `POST /api/species/{key}/threshold`) is
@@ -146,8 +179,10 @@ data class Settings(
     fun json(): JSONObject = JSONObject()
         .put("display_threshold", displayThreshold.toDouble())
         .put("retention_floor", retentionFloor.toDouble())
+        .put("clip_floor", clipFloor.toDouble())
         .put("repeat_required", repeatRequired)
         .put("repeat_window_min", repeatWindowMin)
+        .put("bout_gap_s", boutGapSeconds)
         .put("region_season_filter_enabled", regionSeasonFilterEnabled)
 
     companion object {
@@ -156,8 +191,14 @@ data class Settings(
                 .toFloat().coerceIn(0f, 1f),
             retentionFloor = o.optDouble("retention_floor", base.retentionFloor.toDouble())
                 .toFloat().coerceIn(0f, 1f),
+            clipFloor = o.optDouble("clip_floor", base.clipFloor.toDouble())
+                .toFloat().coerceIn(0f, 1f),
             repeatRequired = o.optInt("repeat_required", base.repeatRequired).coerceIn(1, 10),
             repeatWindowMin = o.optInt("repeat_window_min", base.repeatWindowMin).coerceIn(1, 24 * 60),
+            // 0 disables the gap requirement and restores the old count-detections rule.
+            // Kept reachable rather than removed: the old behaviour is what every stored
+            // row was curated under, and a reader comparing against history needs it.
+            boutGapSeconds = o.optInt("bout_gap_s", base.boutGapSeconds).coerceIn(0, 3600),
             regionSeasonFilterEnabled = o.optBoolean("region_season_filter_enabled", base.regionSeasonFilterEnabled)
         )
     }

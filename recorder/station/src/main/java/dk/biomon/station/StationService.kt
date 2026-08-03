@@ -239,13 +239,19 @@ class StationService : Service(), HealthProvider {
             meanInferenceMsBits.set(java.lang.Double.doubleToLongBits(newMean))
         }
 
-        val floor = settingsStore.get().retentionFloor
+        val cfg = settingsStore.get()
+        val floor = cfg.retentionFloor
         val hits = ArrayList<Pair<Int, Float>>()
         for (i in scores.indices) if (scores[i] >= floor) hits += i to scores[i]
         if (hits.isEmpty()) return
 
         var clipPath: String? = null
         var clipFileWritten = false
+        // Whether this window's AUDIO is worth keeping is a different question from whether
+        // its rows are (Settings.clipFloor). Decided once for the whole window rather than
+        // per hit, because there is only one clip: if anything in this window is worth
+        // listening to, the window is worth keeping.
+        val keepClip = hits.any { it.second >= cfg.clipFloor }
 
         for ((idx, conf) in hits) {
             val sp = speciesTable.byIndex[idx] ?: continue
@@ -256,7 +262,7 @@ class StationService : Service(), HealthProvider {
             // below which still stores and shows in-list-but-implausible detections as
             // low-confidence candidates.
             if (!sp.regional) continue
-            if (!clipFileWritten) {
+            if (keepClip && !clipFileWritten) {
                 clipPath = writeClip(w)
                 clipFileWritten = true
             }

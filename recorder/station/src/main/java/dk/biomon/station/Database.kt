@@ -311,16 +311,44 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         if (rows.isEmpty()) return rows
         val db = readableDatabase
         val windowMs = settings.repeatWindowMin * 60_000L
+        val gapMs = settings.boutGapSeconds * 1000L
         val overrides = speciesThresholdOverrides()
         return rows.map { r ->
+            // Timestamps rather than COUNT(*): the count is what was wrong. Bouts have to be
+            // derived from the SPACING of detections, which a COUNT cannot see.
             val c = db.rawQuery(
-                "SELECT COUNT(*) FROM detections WHERE taxon_key = ? AND detected_at_ms <= ? AND detected_at_ms > ?",
+                "SELECT detected_at_ms FROM detections WHERE taxon_key = ? AND detected_at_ms <= ? " +
+                "AND detected_at_ms > ? ORDER BY detected_at_ms ASC",
                 arrayOf(r.taxon.key, r.detectedAtMs.toString(), (r.detectedAtMs - windowMs).toString()))
-            val repeat = c.use { if (it.moveToFirst()) it.getInt(0) else 1 }
+            val times = ArrayList<Long>()
+            c.use { while (it.moveToNext()) times.add(it.getLong(0)) }
+            val bouts = countBouts(times, gapMs)
             val threshold = effectiveThreshold(r.taxon.key, r.taxonRegional, r.taxonInSeason, settings, overrides)
-            val confirmed = r.confidence >= threshold && repeat >= settings.repeatRequired
-            r.copy(repeatCount = repeat, state = if (confirmed) "confirmed" else "candidate")
+            val confirmed = r.confidence >= threshold && bouts >= settings.repeatRequired
+            // repeat_count now reports BOUTS, not raw rows. The API field keeps its name
+            // because its MEANING is unchanged - "how many times did I hear this" - and it
+            // is the old implementation that failed to answer that question.
+            r.copy(repeatCount = bouts, state = if (confirmed) "confirmed" else "candidate")
         }
+    }
+
+    /**
+     * How many separate bouts these detection times represent — a bout being a run of
+     * detections with no gap longer than [gapMs] inside it.
+     *
+     * The whole correction lives here. Nineteen consecutive windows of one continuous
+     * sound are ONE bout and therefore one piece of evidence, however many rows they
+     * produced; two calls a minute apart are two, even though they are only two rows.
+     *
+     * [gapMs] of 0 restores the old count-every-row behaviour, which is what the stored
+     * history was curated under.
+     */
+    private fun countBouts(times: List<Long>, gapMs: Long): Int {
+        if (times.isEmpty()) return 0
+        if (gapMs <= 0L) return times.size
+        var bouts = 1
+        for (i in 1 until times.size) if (times[i] - times[i - 1] > gapMs) bouts++
+        return bouts
     }
 
     /** The general detections query behind GET /api/detections and the SSE catch-up. */
@@ -363,28 +391,48 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         return row
     }
 
-    private data class DaySummaryRow(val taxonKey: String, val confidence: Float, val regional: Boolean, val inSeason: Boolean)
+    private data class DaySummaryRow(val taxonKey: String, val confidence: Float, val regional: Boolean,
+                                     val inSeason: Boolean, val atMs: Long)
 
+    /**
+     * Per-day counts, under the SAME rule the species and detection views use.
+     *
+     * This used to skip the repeat check and call itself a cheap approximation. It was not
+     * cheap enough to be worth the lie: on a freshly cleared station a single 0.675 row
+     * with no repeat made `/api/days` report "1 detection, 1 species" while `/api/species`
+     * reported 0 confirmed, from the same table, in the same second. Two endpoints
+     * describing one day and disagreeing is worse than a slower rollup — §2d, a partial
+     * answer presented as a whole one.
+     *
+     * The bout grouping is done per (date, taxon) in memory over rows already read, so the
+     * cost is a sort per species per day rather than a query per row.
+     */
     fun daySummaries(settings: Settings): List<DaySummary> {
         val c = readableDatabase.rawQuery(
-            "SELECT local_date, taxon_key, confidence, taxon_regional, taxon_in_season FROM detections " +
-            "WHERE confidence >= ? AND taxon_group != 'non_taxon' AND taxon_key NOT IN ($NON_TAXON_KEYS_SQL)",
+            "SELECT local_date, taxon_key, confidence, taxon_regional, taxon_in_season, detected_at_ms " +
+            "FROM detections WHERE confidence >= ? AND taxon_group != 'non_taxon' " +
+            "AND taxon_key NOT IN ($NON_TAXON_KEYS_SQL)",
             arrayOf(settings.retentionFloor.toString()))
         val byDate = HashMap<String, MutableList<DaySummaryRow>>()
         c.use {
             while (it.moveToNext()) {
                 val date = it.getString(0)
                 byDate.getOrPut(date) { ArrayList() } +=
-                    DaySummaryRow(it.getString(1), it.getFloat(2), it.getInt(3) != 0, it.getInt(4) != 0)
+                    DaySummaryRow(it.getString(1), it.getFloat(2), it.getInt(3) != 0,
+                        it.getInt(4) != 0, it.getLong(5))
             }
         }
         val overrides = speciesThresholdOverrides()
-        // A row only counts if it would show as "confirmed" under today's settings — approximated
-        // here without full repeat-window curation per row (cheap, and days is a rollup, not
-        // the record of truth); species/detection views apply the exact rule.
+        val gapMs = settings.boutGapSeconds * 1000L
         return byDate.map { (date, rows) ->
-            val confirmed = rows.filter {
-                it.confidence >= effectiveThreshold(it.taxonKey, it.regional, it.inSeason, settings, overrides)
+            val confirmed = rows.groupBy { it.taxonKey }.values.flatMap { forTaxon ->
+                // A species qualifies for the day only if its detections form at least
+                // repeatRequired bouts; then every above-threshold row of that species counts.
+                val bouts = countBouts(forTaxon.map { it.atMs }.sorted(), gapMs)
+                if (bouts < settings.repeatRequired) emptyList()
+                else forTaxon.filter {
+                    it.confidence >= effectiveThreshold(it.taxonKey, it.regional, it.inSeason, settings, overrides)
+                }
             }
             DaySummary(date, confirmed.size, confirmed.map { it.taxonKey }.distinct().size)
         }.sortedByDescending { it.date }

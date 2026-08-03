@@ -956,6 +956,24 @@ its own measurement.
     only its cheap proxy.
   **What would settle it**: three nights of data, then compare co-occurrence rates in confirmed-bird
   windows against confirmed-noise windows, with the dawn hour separated out. Not before.
+- **REFUTED 2026-08-03, on 19 h of ground-truth negative audio.** The station ran overnight in a
+  LOUNGE — the observer confirms no bird audio was reachable, so all **5,499 detections across 101
+  species are known-false**, a labelled negative corpus. Scored on it, the ≥3-species rule removes
+  **zero** false confirmations (81 before, 81 after) while suppressing 250 rows; ≥2 species removes
+  12 rows and **no** species, for 15.6 % of all rows suppressed.
+  The reason is structural, and it kills the idea rather than merely failing to support it: of 5,022
+  detection-producing windows, **4,639 are single-species**, and the multi-species windows are
+  uniformly LOW-confidence. Co-occurrence therefore only ever targets rows the confidence threshold
+  has already excluded. It cannot discriminate among the high-confidence detections, which are the
+  only ones that reach a person.
+  The n=12 that motivated it came from a single hour — the same sample-size error §10g named
+  ("sampling uniformly to evaluate a detector measures the silence"), committed again despite being
+  flagged in the entry above. **The lesson worth keeping is the meta one: a hypothesis logged with
+  its own sample-size caveat still needs the measurement before it earns any weight.**
+  **What the negative corpus can and cannot do.** It bounds false positives and nothing else: it
+  contains no true positives, so a rule that rejects everything scores perfectly on it. It is a VETO
+  on rules that let junk through, never a target to tune toward — tuning to it alone reproduces the
+  §4 failure mode where a species that cannot be reported is worse than a false positive.
 - Verification-as-a-feature: the differentiator competitors lack. Human-in-the-loop confirm/correct that feeds a defensible local dataset.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
