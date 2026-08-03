@@ -2,6 +2,8 @@
 
 > Single source of truth. This chat (architect) updates it; Claude Code (builder) implements against it.
 > A decision isn't real until it's written here. Design flows one direction: decide → doc → build.
+>
+> **Anything a human will look at is governed by [`.claude/skills/biomon-ui/SKILL.md`](.claude/skills/biomon-ui/SKILL.md) — read it before writing any HTML, CSS or JS. It is binding, not inspiration.**
 
 ---
 
@@ -185,6 +187,26 @@ So, everywhere:
   A real singer produces a *run* of windows; a spurious peak often does not. This generalises
   across species (unlike a per-species threshold) and is cheap to compute from data already
   stored. **Not yet built or validated** — it is an observation from two cases, not a rule.
+- **DOWNGRADED 2026-08-02 on station evidence — persistence measures DURATION, not veracity.**
+  The bird station ran BirdNET at a 3.0 s window / 1.5 s hop and produced a **19-consecutive-window**
+  run of *Porzana porzana* (Spotted Crake) on a Copenhagen balcony in August, confidence tracing a
+  single smooth arc (0.15 → 0.92 → 0.15) across ~30 s. By the rule above that is the strongest
+  possible evidence; in fact it is one noise event, and the species calls April–June at night.
+  **30 of 47 inter-detection gaps were exactly 1.5 s — the hop interval**, i.e. the run length was
+  reporting how long a sound lasted divided by the hop, and nothing else.
+  Two things were conflated and must now be kept apart:
+  - **A run of windows is a run of overlapping samples of the same air.** At 3.0 s / 1.5 s each
+    window shares half its audio with its neighbour, so a run of *n* is closer to *n/2* independent
+    observations, and none of them is independent of the others' sound source.
+  - **Duration is not identity.** A 30 s continuous sound and a 30 s song produce identical run
+    lengths. The `020825` bout scored 6/6 because it *was* a long song; the balcony run scored 19/19
+    because a machine ran for half a minute. The statistic cannot tell them apart, and no threshold
+    on it can.
+  What survives: persistence remains useful as a **necessary** condition (an isolated window is
+  still weak evidence) and useless as a **sufficient** one. The consequence for the station is
+  logged in §9 — the repeat rule now counts **bouts separated by > 60 s**, not consecutive windows.
+  The `020825` 6/6 figure is not retracted; it is reinterpreted as one bout, which is what §3b
+  already warned it was ("n=1 event and 6 correlated windows, not 6 independent samples").
 - **Empirical confirmation on our own audio (2026-07-28).** Perch was run over the five Aug-2025 stridulation bouts that `strid_scan.py` had independently flagged (regular ~48.9 Hz pulse train, broadband to 17 kHz, t≈1035–1070 s). Perch returns **`Chorthippus brunneus`** (field grasshopper — common in Denmark, sings in late summer) as **top-1 on 5/5 clips**, logits **10.2–12.3** against runners-up of 5.5–7.2, and those runners-up are themselves mostly Orthoptera (*Euchorthippus*, *Chorthippus jacobsi*, *Myrmeleotettix maculatus*, *Arcyptera fusca*) — i.e. confidently in the right taxonomic neighbourhood.
   - **What the corroboration does and does not cover.** The two methods agree only that **an orthopteran was stridulating here** — `strid_scan` measures *pulse periodicity* and cannot separate *Chorthippus brunneus* from any other grasshopper. The **species call rests on Perch alone: uncalibrated, single model, single bout.** Do not state this as "two independent methods agree on the species."
   - It also **corrects BirdNET**, which had labelled this bout *"Fork-tailed Bush Katydid"* — a North American Tettigoniid. BirdNET has no Danish Orthoptera classes, so it snapped to the nearest available one; the same nearest-class failure mode as the video classifier's ant→`fly_small`. Perch has the actual Danish species.
@@ -911,10 +933,36 @@ its own measurement.
 - **Thermal saving from interval stills is still unmeasured.** Needs a deliberate run: one phone, one sun, video then stills, `dumpsys thermalservice` logged (§6b, §6d).
 - Native app (APK) needed for unattended deployment; PWA insufficient for background camera. Not started.
 - Domain mismatch: public clips are recordist-quality; deployment audio is cheap-mic-in-a-garden. Band-limit training to mic bandwidth and/or add a few own recordings per region for calibration.
+- **HYPOTHESIS, NOT ADOPTED — within-window species co-occurrence as a species-agnostic noise
+  discriminator (logged 2026-08-02, n=12).** In 55 minutes of station audio, **115 windows produced
+  a detection and 12 produced more than one species**. One 3 s window at 21:18:14 returned
+  *Regulus regulus* (Goldcrest), *Porzana porzana* (Spotted Crake), *Poecile montanus* (Willow Tit)
+  and *Fulica atra* (Eurasian Coot) simultaneously. Four species cannot vocalise in the same three
+  seconds on a balcony, so the window is far better explained by one broadband event exciting
+  several classes than by four birds.
+  **Proposed rule, stated so it can be tested rather than argued about: suppress any window in
+  which ≥ 3 distinct species fire above the retention floor.** Attractions: it needs no per-species
+  tuning, no regional list and no phenology, so it generalises to Orthoptera and to the insect
+  vision path unchanged; and it is computable from data already stored, retroactively, at read time.
+  **Why it is NOT adopted.** n = 12 co-occurrence events from a single hour at a single site with a
+  single microphone — the same sample-size mistake §10g already made once ("sampling uniformly to
+  evaluate a detector measures the silence"). Two specific ways it could be wrong:
+  - **Dawn chorus is a genuine ≥3-species window.** The rule as stated would be most destructive
+    exactly when the station is most productive, which is the §4 failure mode — a species that
+    cannot be reported is worse than a false positive.
+  - **The threshold may be on the wrong axis.** It may be that the *count* matters less than
+    whether the co-firing species are acoustically unrelated (a crake, a tit and a coot share no
+    frequency band); a spectral-overlap test might be the real discriminator, with co-occurrence
+    only its cheap proxy.
+  **What would settle it**: three nights of data, then compare co-occurrence rates in confirmed-bird
+  windows against confirmed-noise windows, with the dawn hour separated out. Not before.
 - Verification-as-a-feature: the differentiator competitors lack. Human-in-the-loop confirm/correct that feeds a defensible local dataset.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-08-02, **the repeat rule was measuring the wrong thing**) **Station curation: ≥2 detections becomes ≥2 bouts >60 s apart.** 55 min of balcony audio, 135 rows, 35 species, 11 confirmed. Of 13 rows over threshold the ≥2-detections rule rejected **2**, and passed a **19-consecutive-window** *Porzana porzana* (Spotted Crake) run that is one ~30 s noise event — a species that calls April–June at night, scored at 0.918 in August in Amager. The mechanism is arithmetic, not bad luck: at a 3.0 s window / **1.5 s hop** consecutive windows share half their audio, and **30 of 47 inter-detection gaps were exactly 1.5 s**. The rule was counting how long a sound lasted. It now requires two bouts separated by **> 60 s**, which is a claim about the animal (it called, stopped, and called again) rather than about the analysis window. §3b's persistence hypothesis is downgraded accordingly — persistence is **necessary, not sufficient**. Second finding from the same hour, logged as a hypothesis in §8 and deliberately **not** built: 12 windows returned multiple species and one returned four (Goldcrest + Spotted Crake + Willow Tit + Coot in the same 3 s), which no balcony can produce.
+- (2026-08-02, **§2d again**) **The regional gate was removing the tell, not the error.** `regional` flags **455 of 6522** BirdNET classes because the DOF list is a *national checklist including every vagrant ever recorded* — so Dark-eyed Junco (12 rows), Sandhill Crane and White-throated Sparrow all read as "Danish species", while the gate's write-path `continue` silently deletes the obviously-absurd classes that would have told an observer the model was guessing. Membership is the wrong instrument; it answers "has this ever occurred in Denmark" when the question is "how likely is it here, this week". Being replaced by BirdNET's own location/week occurrence meta-model — a probability, not a set. Also note the gate contradicted the rule stated in `Model.kt` and `build_station_species.py` ("never drop a class, down-weight it"); the code and its own documentation had diverged.
+- (2026-08-02, **retention hazard found before it cost anything**) **`onUpgrade` has issued an unconditional `DELETE FROM detections` in two of four schema versions**, and `pruneToCapBytes` deletes clip FILES while keeping rows (nulling `clip_path`), with `pruned_total` hardcoded to 0 in `/api/health` so it is invisible. Neither is a bug today; both are fatal to a life list, where the audio behind a lifer is unrecoverable. Consequence for the life-list schema: pinning must cover **rows as well as clips**, migrations must exclude pinned rows, and pruning must skip them.
 - (2026-07-30) **First interval-stills capture, and it reported 0 insects when at least three are plainly visible (§6d).** 1,026 images at 1.97 fps. Three constants that read as being about insects turned out to be about the camera: blob area limits (the board is **4.65×** the corpus area, so 8..2500 px meant "nothing bigger than a fifth of the corpus maximum"), the rolling-median window (`sample_every=30` is 240 s at 5.97 Hz and **730 s** at 1.97 Hz, longer than the whole capture), and the crop context floor. Each fix derives the constant from the capture and reproduces the corpus value exactly - `240726_1` re-ran to 2,410 blobs byte-for-byte. Also **the mount sagged 11.7 px**, which put **94.6 % of 20,232 blobs on the board's two support wires**; the corpus never showed this because at 1080p the wires were a pixel wide and `MORPH_OPEN` erased them - **the bug appeared because the sensor got better**. Window fix plus phase-correlation registration take 20,232 blobs to 3,610. The count stays 0 in all three variants: every real visit lasted **one frame**, so `n>=3` removes them, and the classifier calls all 14 candidates junk at 41-92 % - **`none_dirt` 87 % on a sharply focused fly**. Framing (1.9×-10× context) and pixel scale (1×-4.5× downsample) both swept and refuted; a control on the corpus's own 63 confirmed crops returns 54 insect, so the probe is sound and this is **domain mismatch**, measured at last rather than anticipated.
 - (2026-07-30, **measures a caveat that was open since §6b**) **The sub-0.8 s blind spot is not a minority case - in `300726_1` it is every case.** The fps knee test could not see visits under 0.8 s because the persistence filter had already deleted them. At 12 MP a single frame is unambiguous enough to adjudicate by eye, and every one of the 14 candidates is single-frame. One candidate persisted TWO frames and so **passed** the rate-derived duration test, failing only the sample count: `MIN_SAMPLES=3` is the half of the persistence rule that stayed in the camera’s terms, invisible at 5.97 Hz where it coincides with the derived value and an override at every lower rate (derived n is **1** at both 3.0 and 1.97 Hz). The open decision — the observer’s, per §2b — is whether it should follow the capture mode, with the price tag in §6d.
 - (2026-07-30, **rule earning its keep**) §2d again, twice in one session: "20,232 blobs" was a drifting mount reported as activity, and "0 insects" was two filters reported as an empty board. Both runs exited 0.
