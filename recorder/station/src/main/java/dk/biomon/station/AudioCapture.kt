@@ -35,6 +35,22 @@ class AudioCapture(private val ctx: Context) {
         const val HOP_S = 1.5
         const val WINDOW_SAMPLES = (MODEL_RATE * WINDOW_S).toInt()   // 144_000
         const val HOP_SAMPLES = (MODEL_RATE * HOP_S).toInt()          // 72_000
+
+        /**
+         * Seconds of capture discarded before any window reaches the model.
+         *
+         * AudioRecord's first buffers after startRecording() are not trustworthy audio:
+         * the mic is still settling, and on a device where UNPROCESSED is honoured there
+         * is no AGC to hide it. Observed directly — on a freshly cleared station the very
+         * first stored detection, two seconds after boot, was a Great Spotted Woodpecker
+         * at 0.675 in a closed lounge.
+         *
+         * Only the INFERENCE path is gated. The spectrogram tap keeps receiving audio
+         * throughout, because a display that stays blank for five seconds after start
+         * looks like the failure it is meant to rule out, and because its own noise floor
+         * needs those seconds of history anyway.
+         */
+        const val WARMUP_S = 5.0
         private val PREFERRED_RATES = intArrayOf(48000, 44100, 32000, 22050, 16000)
     }
 
@@ -141,6 +157,8 @@ class AudioCapture(private val ctx: Context) {
         val ring = ShortArray(windowAtCaptureRate * 2)
         var ringFill = 0
         var sinceLastWindow = 0
+        var capturedSinceStart = 0L
+        val warmupSamples = (WARMUP_S * captureRate).toLong()
         val readBuf = ShortArray(minBuf / 2)
 
         rec.startRecording()
@@ -161,8 +179,10 @@ class AudioCapture(private val ctx: Context) {
                 ringFill += n
                 sinceLastWindow += n
 
+                capturedSinceStart += n
                 if (ringFill >= windowAtCaptureRate && sinceLastWindow >= hopAtCaptureRate) {
                     sinceLastWindow = 0
+                    if (capturedSinceStart < warmupSamples) continue
                     val startOffset = ringFill - windowAtCaptureRate
                     val raw = ring.copyOfRange(startOffset, startOffset + windowAtCaptureRate)
                     val pcm16 = if (needsResample) resample(raw, captureRate, MODEL_RATE) else raw

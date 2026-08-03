@@ -59,6 +59,7 @@ class StationService : Service(), HealthProvider {
     private var birdNet: BirdNet? = null
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var spectrogram: Spectrogram? = null
+    @Volatile private var priorStatus: String = "not started"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val serviceStartedAtMs = System.currentTimeMillis()
@@ -97,6 +98,12 @@ class StationService : Service(), HealthProvider {
 
         acquireWakeLock()
         loadModelAndStartCapture()
+        // Off the capture thread and after it: priors are a nicety, audio is not.
+        scope.launch {
+            priorStatus = PriorBuilder.buildIfNeeded(
+                this@StationService, db, speciesTable, stationInfo.lat ?: 0.0, stationInfo.lon ?: 0.0)
+            android.util.Log.i("StationService", "priors: $priorStatus")
+        }
         schedulePruning()
         schedulePhotoFetch()
         Watchdog.schedule(this)
@@ -281,6 +288,10 @@ class StationService : Service(), HealthProvider {
                 taxonRegional = taxon.regional, taxonInSeason = inSeason
             )
             val id = db.insert(nd)
+            // Candidates accumulate from new detections only — nothing is grandfathered into
+            // the life list, and nothing here can ever reach 'confirmed'. That transition is
+            // reserved for a human verdict (Database.recordVerification).
+            db.noteDetection(id, taxon, w.startAtMs, conf, "balcony-5t")
             scope.launch { publisher.publish(listOf(id)) }
 
             val curated = db.listDetections(sinceMs = w.startAtMs - 1, date = null, group = null,
@@ -373,6 +384,13 @@ class StationService : Service(), HealthProvider {
             .put("schema", 1)
             .put("station", JSONObject().put("id", "balcony-5t").put("name", "Balcony")
                 .put("lat", 55.6478).put("lon", 12.5875).put("tz", java.util.TimeZone.getDefault().id))
+            // The build actually running, not the one you think is running. GIT_SHA carries
+            // a trailing "+" when the tree was dirty at build time, because "which commit"
+            // is a lie if uncommitted edits went into the APK.
+            .put("app", JSONObject()
+                .put("version", BuildConfig.VERSION_NAME)
+                .put("commit", BuildConfig.GIT_SHA)
+                .put("built_at", BuildConfig.BUILT_AT))
             .put("server_ms", System.currentTimeMillis())
             .put("listening", listening)
             .put("uptime_ms", System.currentTimeMillis() - serviceStartedAtMs)
@@ -391,6 +409,10 @@ class StationService : Service(), HealthProvider {
                 .put("duty_pct", Math.round(lastInferenceMs.get() / (AudioCapture.HOP_S * 1000) * 1000) / 10.0)
                 .put("windows_total", windowsTotal.get())
                 .put("windows_skipped_thermal", windowsSkippedThermal.get()))
+            .put("priors", JSONObject()
+                .put("rows", runCatching { db.priorCount() }.getOrDefault(0))
+                .put("meta_model_present", MetaModel.isPresent(this))
+                .put("status", priorStatus))
             .put("spectrogram", spectrogram.let { s ->
                 JSONObject()
                     .put("running", s != null)

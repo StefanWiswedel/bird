@@ -371,9 +371,80 @@ class HttpServer(
                           "Content-Length: ${bytes.size}\r\n\r\n").toByteArray())
                 out.write(bytes)
             }
+            p == "/api/life-list" -> {
+                val arr = org.json.JSONArray()
+                for (s in db.lifeList()) arr.put(JSONObject()
+                    .put("scientific", s.scientific).put("common", s.common)
+                    .put("status", s.status)
+                    .put("first_detected_at", s.firstDetectedAt ?: JSONObject.NULL)
+                    .put("first_confirmed_at", s.firstConfirmedAt ?: JSONObject.NULL)
+                    .put("lifer_detection_id", s.liferDetectionId ?: JSONObject.NULL)
+                    .put("best_detection_id", s.bestDetectionId ?: JSONObject.NULL)
+                    .put("total_detections", s.totalDetections)
+                    .put("photo", photoJson(slugOf(s.scientific)) ?: JSONObject.NULL))
+                val confirmed = db.lifeList().count { it.status == "confirmed" }
+                writeJson(out, 200, JSONObject().put("schema", 1)
+                    .put("confirmed_count", confirmed).put("count", arr.length())
+                    .put("species", arr).put("station", station.json()))
+            }
+            p == "/api/verify/queue" -> {
+                val limit = (req.query["limit"]?.toIntOrNull() ?: 20).coerceIn(1, 100)
+                val week = birdnetWeek(System.currentTimeMillis())
+                val q = db.verifyQueue(settings.get(), week, limit)
+                val arr = org.json.JSONArray()
+                for ((row, prior) in q) {
+                    val det = row.toDetection().json(station.json(), photoJson(row.taxon.key))
+                    val status = db.speciesStatus(row.taxon.scientific)
+                    arr.put(det
+                        .put("prior", prior ?: JSONObject.NULL)
+                        // A low local prior means BOTH "exciting" and "check this carefully".
+                        // One flag, both meanings — see the design spec's --signal rule.
+                        .put("rarity_flag", prior != null && prior < RARITY_PRIOR)
+                        .put("would_be_lifer", status?.firstConfirmedAt == null))
+                }
+                writeJson(out, 200, JSONObject().put("schema", 1).put("week", week)
+                    .put("priors_available", db.priorCount() > 0)
+                    .put("count", arr.length()).put("queue", arr)
+                    .put("life_list_size", db.lifeList().count { it.status == "confirmed" }))
+            }
+            p.startsWith("/api/verify/") && req.method == "POST" -> {
+                val id = p.removePrefix("/api/verify/").toLongOrNull()
+                if (id == null) { writeJson(out, 400, JSONObject().put("error", "bad id")); return }
+                val body = runCatching { JSONObject(String(req.body)) }.getOrNull() ?: JSONObject()
+                val verdict = body.optString("verdict")
+                if (verdict !in setOf("yes", "no", "unsure")) {
+                    writeJson(out, 400, JSONObject().put("error", "verdict must be yes|no|unsure")); return
+                }
+                val st = db.recordVerification(id, verdict, body.optString("note").ifBlank { null })
+                if (st == null) { writeJson(out, 404, JSONObject().put("error", "no such detection")); return }
+                writeJson(out, 200, JSONObject().put("schema", 1)
+                    .put("scientific", st.scientific).put("common", st.common)
+                    .put("status", st.status)
+                    .put("first_confirmed_at", st.firstConfirmedAt ?: JSONObject.NULL)
+                    .put("is_lifer", verdict == "yes" && st.liferDetectionId == id)
+                    .put("life_list_size", db.lifeList().count { it.status == "confirmed" }))
+            }
+            // GET previews what would be destroyed; DELETE does it. The old button reported
+            // only "Cleared." even when it had left photos and orphaned clips behind, which
+            // is how it earned the description "it didn't clear everything".
+            p == "/api/data" && req.method == "GET" -> {
+                val pv = db.clearPreview()
+                writeJson(out, 200, JSONObject().put("detections", pv.detections)
+                    .put("clips", pv.clips).put("confirmed_species", pv.confirmedSpecies)
+                    .put("pinned_clips", pv.pinnedClips))
+            }
             p == "/api/data" && req.method == "DELETE" -> {
-                db.clearAll()
-                writeJson(out, 200, JSONObject().put("cleared", true))
+                // Destroying a life list is a separate, explicit act — it records human
+                // decisions that re-recording cannot reproduce. Default keeps it.
+                val alsoLifeList = req.query["life_list"] == "true"
+                val before = db.clearPreview()
+                db.clearAll(keepLifeList = !alsoLifeList)
+                val after = db.clearPreview()
+                writeJson(out, 200, JSONObject().put("cleared", true)
+                    .put("detections_deleted", before.detections - after.detections)
+                    .put("clips_deleted", before.clips - after.clips)
+                    .put("life_list_kept", !alsoLifeList)
+                    .put("confirmed_species_remaining", after.confirmedSpecies))
             }
             p.startsWith("/api/clip/") -> {
                 val id = p.removePrefix("/api/clip/").toLongOrNull()
@@ -417,6 +488,26 @@ class HttpServer(
             else -> writeJson(out, 404, JSONObject().put("error", "not found").put("path", p))
         }
     }
+
+    private companion object {
+        /** Below this local-occurrence prior a detection is flagged rare. Provisional: it is
+         *  a guess until the meta-model has run for this station and the distribution of
+         *  priors here can actually be looked at. Named rather than inlined for that reason. */
+        const val RARITY_PRIOR = 0.02
+    }
+
+    /** BirdNET's 48-week convention: four weeks per month, the 4th absorbing the remainder.
+     *  Must match how the priors were generated or every lookup is silently off. */
+    private fun birdnetWeek(atMs: Long): Int {
+        val c = java.util.Calendar.getInstance().apply { timeInMillis = atMs }
+        val month = c.get(java.util.Calendar.MONTH) + 1
+        val day = c.get(java.util.Calendar.DAY_OF_MONTH)
+        return (month - 1) * 4 + minOf(3, (day - 1) / 7) + 1
+    }
+
+    /** Same slug rule as build_station_species.py, so photo files line up. */
+    private fun slugOf(scientific: String): String =
+        scientific.lowercase().replace(Regex("[^a-z0-9]"), "_").replace(Regex("_+"), "_").trim('_')
 
     private fun photoJson(taxonKey: String): JSONObject? {
         val meta = PhotoCache.photoMeta(ctx, taxonKey) ?: return null

@@ -1,3 +1,9 @@
+// Imported rather than fully qualified: inside the Kotlin DSL a bare `java.` resolves to
+// the JavaPluginExtension, not the package, so `java.time.Instant` fails to compile.
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -26,6 +32,28 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+
+        // BUILD STAMP. versionName alone cannot answer the only question that actually
+        // gets asked — "is the phone running what I just built?" — because it stays
+        // 0.1.0 across every rebuild. This cost real confusion once: four backend builds
+        // were installed in a session while the dashboard still served an older UI, and
+        // there was no way to tell by looking. The commit and the build time are what
+        // distinguish two builds of the same version, so both are stamped in and surfaced
+        // in /api/health and in the dashboard header.
+        //
+        // Resolved at CONFIGURATION time and failing soft: a build must not break because
+        // git is absent or this is a source export with no repository.
+        val gitSha = providers.exec {
+            commandLine("git", "rev-parse", "--short=8", "HEAD")
+        }.standardOutput.asText.map { it.trim() }.orElse("nogit").get()
+        val gitDirty = providers.exec {
+            commandLine("git", "status", "--porcelain")
+        }.standardOutput.asText.map { if (it.isBlank()) "" else "+" }.orElse("").get()
+        val builtAt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+            .withZone(ZoneId.systemDefault()).format(Instant.now())
+
+        buildConfigField("String", "GIT_SHA", "\"$gitSha$gitDirty\"")
+        buildConfigField("String", "BUILT_AT", "\"$builtAt\"")
     }
 
     buildTypes {

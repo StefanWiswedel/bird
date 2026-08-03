@@ -60,7 +60,71 @@ data class DaySummaryData(
  * (API.md §1 "Field rules that matter"). Rows below `retentionFloor` are never written
  * at all; that is the one setting applied at WRITE time, and the asymmetry is by design.
  */
-class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station.db", null, 4) {
+class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station.db", null, 5) {
+
+    /**
+     * The life list, its evidence, and the local-occurrence prior.
+     *
+     * A species enters the list by VERIFICATION, never by score. That is the whole design:
+     * gating the list on a human decision is what turns verification from a chore into the
+     * thing that earns the reward. Nothing is grandfathered — the list starts empty and
+     * fills up only as the observer confirms.
+     */
+    private fun createLifeList(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE species_status (
+                scientific_name     TEXT PRIMARY KEY,
+                common_name         TEXT,
+                status              TEXT NOT NULL,
+                first_detected_at   TEXT,
+                first_confirmed_at  TEXT,
+                lifer_detection_id  INTEGER,
+                best_detection_id   INTEGER,
+                total_detections    INTEGER NOT NULL DEFAULT 0,
+                station             TEXT NOT NULL
+            )
+        """.trimIndent())
+        db.execSQL("""
+            CREATE TABLE verifications (
+                detection_id  INTEGER NOT NULL,
+                verdict       TEXT NOT NULL,
+                verified_at   TEXT NOT NULL,
+                note          TEXT
+            )
+        """.trimIndent())
+        db.execSQL("CREATE INDEX idx_verif_det ON verifications(detection_id)")
+        db.execSQL("""
+            CREATE TABLE species_prior (
+                scientific_name  TEXT NOT NULL,
+                week             INTEGER NOT NULL,
+                prior            REAL NOT NULL,
+                PRIMARY KEY (scientific_name, week)
+            )
+        """.trimIndent())
+    }
+
+    /**
+     * Detection ids that must survive everything: the clip that earned a lifer, and the
+     * best clip held for a species. Losing either is unrecoverable — the audio behind a
+     * lifer cannot be re-recorded.
+     *
+     * This is consulted by BOTH the storage cap and the "clear all" path, and any future
+     * migration must consult it too. That is not hypothetical caution: onUpgrade has
+     * issued an unconditional DELETE FROM detections in two of five schema versions, and
+     * pruneToCapBytes deletes clip FILES while leaving rows behind. At the measured clip
+     * rate the 8 GB cap turns over in weeks, so an unpinned lifer clip is not a distant
+     * risk, it is a scheduled deletion.
+     */
+    fun pinnedDetectionIds(): Set<Long> {
+        val out = HashSet<Long>()
+        runCatching {
+            readableDatabase.rawQuery(
+                "SELECT lifer_detection_id FROM species_status WHERE lifer_detection_id IS NOT NULL " +
+                "UNION SELECT best_detection_id FROM species_status WHERE best_detection_id IS NOT NULL", null
+            ).use { while (it.moveToNext()) out.add(it.getLong(0)) }
+        }
+        return out
+    }
 
     private fun createDetections(db: SQLiteDatabase) {
         db.execSQL("""
@@ -109,6 +173,7 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
     override fun onCreate(db: SQLiteDatabase) {
         createDetections(db)
         createSpeciesSettings(db)
+        createLifeList(db)
         db.execSQL("""
             CREATE TABLE outbox_delivery (
                 detection_id INTEGER NOT NULL,
@@ -141,11 +206,19 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             // (build_station_species.py's NON_TAXON_LABELS) instead of trusting the stored
             // taxon_group column — a key never changes retroactively, unlike a group tag
             // that was wrong at the time a row was written.
+            //
+            // PINNING NOTE (added at v5): this and the v3 migration above predate the life
+            // list and delete rows unconditionally. They are left as they are because a
+            // device that already ran them cannot un-run them, and because no life list
+            // existed to protect at the time. EVERY MIGRATION FROM v5 ONWARDS MUST EXCLUDE
+            // pinnedDetectionIds() — see that function. This is the single most dangerous
+            // habit in this file's history.
             val whereKey = "taxon_group = 'non_taxon' OR taxon_key IN ($NON_TAXON_KEYS_SQL)"
             val c = db.rawQuery("SELECT clip_path FROM detections WHERE ($whereKey) AND clip_path IS NOT NULL", null)
             c.use { while (it.moveToNext()) runCatching { File(it.getString(0)).delete() } }
             db.execSQL("DELETE FROM detections WHERE $whereKey")
         }
+        if (oldVersion < 5) createLifeList(db)
     }
 
     fun insert(d: NewDetection): Long {
@@ -239,18 +312,53 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         )
         val NON_TAXON_KEYS_SQL = NON_TAXON_KEYS.joinToString(",") { "'$it'" }
 
-        /** The threshold this exact row must clear to be "confirmed". An explicit
-         *  per-species override replaces the global default outright; otherwise the
-         *  region/season penalty (if enabled) stacks additively on top of it. */
+        /**
+         * Penalty scale for local implausibility, applied on a LOG scale because the
+         * priors themselves span five orders of magnitude and a linear reading of them is
+         * meaningless. Measured at Copenhagen, week 29: Wood Pigeon 0.99, Blackbird 0.72,
+         * Magpie 0.53, Tawny Owl 0.038, Spotted Crake 0.0086, Dark-eyed Junco 0.00008.
+         * Linear scaling would treat the last three as indistinguishably "about zero";
+         * they are in fact a plausible bird, an implausible one, and an impossible one.
+         *
+         * Anchored so that prior >= PRIOR_FULL costs nothing, and each factor-of-ten below
+         * it adds PRIOR_PENALTY_PER_DECADE to the bar.
+         */
+        const val PRIOR_FULL = 0.05f
+        const val PRIOR_PENALTY_PER_DECADE = 0.12f
+
+        /**
+         * The threshold this exact row must clear to be "confirmed".
+         *
+         * An explicit per-species override replaces everything — a human's precise answer
+         * always beats the heuristic. Otherwise the LOCAL OCCURRENCE PRIOR raises the bar,
+         * having replaced the Danish-checklist boolean that used to do this job. That
+         * boolean was set membership against a national vagrant list, so it rated
+         * Dark-eyed Junco and Wood Pigeon identically; the prior separates them by four
+         * orders of magnitude. A null prior costs nothing — the meta-model may not have
+         * run, and unknown must never read as absent (DESIGN §2d).
+         *
+         * Note this DOWN-WEIGHTS and never drops: the bar is capped below 1.0 so a
+         * sufficiently confident detection of an implausible species can still surface,
+         * which is how a genuine vagrant gets reported instead of silently deleted.
+         */
         fun effectiveThreshold(
             taxonKey: String, regional: Boolean, inSeason: Boolean,
-            settings: Settings, overrides: Map<String, Float>
+            settings: Settings, overrides: Map<String, Float>, prior: Double? = null
         ): Float {
             overrides[taxonKey]?.let { return it }
             var t = settings.displayThreshold
             if (settings.regionSeasonFilterEnabled) {
-                if (!regional) t += REGIONAL_PENALTY
-                if (!inSeason) t += SEASONAL_PENALTY
+                if (prior != null) {
+                    if (prior < PRIOR_FULL) {
+                        val decades = kotlin.math.log10(PRIOR_FULL / prior.coerceAtLeast(1e-6)).toFloat()
+                        t += decades * PRIOR_PENALTY_PER_DECADE
+                    }
+                } else {
+                    // No prior available: fall back to the old booleans so a station whose
+                    // meta-model was never pushed still gets the weaker filter it had before.
+                    if (!regional) t += REGIONAL_PENALTY
+                    if (!inSeason) t += SEASONAL_PENALTY
+                }
             }
             return t.coerceIn(0f, MAX_EFFECTIVE_THRESHOLD)
         }
@@ -313,6 +421,7 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         val windowMs = settings.repeatWindowMin * 60_000L
         val gapMs = settings.boutGapSeconds * 1000L
         val overrides = speciesThresholdOverrides()
+        val priorCache = HashMap<Int, Map<String, Double>>()
         return rows.map { r ->
             // Timestamps rather than COUNT(*): the count is what was wrong. Bouts have to be
             // derived from the SPACING of detections, which a COUNT cannot see.
@@ -323,7 +432,12 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             val times = ArrayList<Long>()
             c.use { while (it.moveToNext()) times.add(it.getLong(0)) }
             val bouts = countBouts(times, gapMs)
-            val threshold = effectiveThreshold(r.taxon.key, r.taxonRegional, r.taxonInSeason, settings, overrides)
+            // Prior is looked up for the week the detection HAPPENED in, not the week the
+            // dashboard is being read in — the same rule taxonInSeason follows, and for the
+            // same reason: re-judging a March record against August's expectations is a lie
+            // about what was plausible at the time.
+            val prior = priorCache.getOrPut(weekOf(r.detectedAtMs)) { priorsForWeek(weekOf(r.detectedAtMs)) }[r.taxon.scientific]
+            val threshold = effectiveThreshold(r.taxon.key, r.taxonRegional, r.taxonInSeason, settings, overrides, prior)
             val confirmed = r.confidence >= threshold && bouts >= settings.repeatRequired
             // repeat_count now reports BOUTS, not raw rows. The API field keeps its name
             // because its MEANING is unchanged - "how many times did I hear this" - and it
@@ -479,12 +593,17 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
     fun pruneToCapBytes(capBytes: Long): Int {
         var total = clipsBytesTotal()
         if (total <= capBytes) return 0
+        // Pinned clips are exempt and are not counted as prunable. If the cap can only be
+        // met by deleting pinned audio, the cap loses: a life list with missing evidence is
+        // worth less than the disk space it would free.
+        val pinned = pinnedDetectionIds()
         val c = readableDatabase.rawQuery(
             "SELECT id, clip_path FROM detections WHERE clip_path IS NOT NULL ORDER BY detected_at_ms ASC", null)
         var pruned = 0
         c.use {
             while (it.moveToNext() && total > capBytes) {
                 val id = it.getLong(0); val path = it.getString(1)
+                if (id in pinned) continue
                 val f = File(path)
                 val sz = if (f.exists()) f.length() else 0L
                 if (f.exists()) f.delete()
@@ -501,11 +620,243 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
      *  threshold overrides, for a fresh start. Global settings (display_threshold etc.)
      *  and the static species reference table are untouched: this clears what was
      *  OBSERVED, not how the station is configured. */
-    fun clearAll() {
-        val c = readableDatabase.rawQuery("SELECT clip_path FROM detections WHERE clip_path IS NOT NULL", null)
-        c.use { while (it.moveToNext()) runCatching { File(it.getString(0)).delete() } }
-        writableDatabase.delete("detections", null, null)
+    // ------------------------------------------------------------------ life list
+
+    data class SpeciesStatus(
+        val scientific: String, val common: String, val status: String,
+        val firstDetectedAt: String?, val firstConfirmedAt: String?,
+        val liferDetectionId: Long?, val bestDetectionId: Long?,
+        val totalDetections: Int
+    )
+
+    /**
+     * Record that a species was detected. Creates it as a CANDIDATE if unseen.
+     *
+     * Nothing here can ever produce a 'confirmed' — that transition happens only in
+     * [recordVerification], from a human verdict. A classifier score, however high, is not
+     * evidence of presence; it is an invitation to go and check. Keeping the two apart in
+     * the write path is what makes the life list mean something.
+     */
+    fun noteDetection(detectionId: Long, taxon: Taxon, atMs: Long, confidence: Float, station: String) {
+        val db = writableDatabase
+        val iso = Detection.iso(atMs)
+        val cur = db.rawQuery(
+            "SELECT status, best_detection_id, total_detections FROM species_status WHERE scientific_name = ?",
+            arrayOf(taxon.scientific))
+        var status: String? = null; var bestId: Long? = null; var total = 0
+        cur.use {
+            if (it.moveToFirst()) {
+                status = it.getString(0)
+                bestId = if (it.isNull(1)) null else it.getLong(1)
+                total = it.getInt(2)
+            }
+        }
+        if (status == null) {
+            db.insertWithOnConflict("species_status", null, ContentValues().apply {
+                put("scientific_name", taxon.scientific); put("common_name", taxon.common)
+                put("status", "candidate"); put("first_detected_at", iso)
+                put("best_detection_id", detectionId); put("total_detections", 1)
+                put("station", station)
+            }, SQLiteDatabase.CONFLICT_IGNORE)
+            return
+        }
+        // best_detection_id tracks the strongest evidence so far, and is PINNED, so it is
+        // only moved when the new row genuinely beats the old one.
+        val betterId = if (bestId == null) detectionId else {
+            val prev = readableDatabase.rawQuery(
+                "SELECT confidence FROM detections WHERE id = ?", arrayOf(bestId.toString())
+            ).use { if (it.moveToFirst()) it.getFloat(0) else -1f }
+            if (confidence > prev) detectionId else bestId
+        }
+        db.update("species_status", ContentValues().apply {
+            put("total_detections", total + 1)
+            put("best_detection_id", betterId)
+        }, "scientific_name = ?", arrayOf(taxon.scientific))
+    }
+
+    /**
+     * A human verdict on one detection. 'yes' is the only thing that can create a lifer.
+     *
+     * first_confirmed_at and lifer_detection_id are written ONCE and never moved: the
+     * lifer moment is a fact about when it happened, not a running maximum.
+     */
+    fun recordVerification(detectionId: Long, verdict: String, note: String?): SpeciesStatus? {
+        val db = writableDatabase
+        val row = readableDatabase.rawQuery(
+            "SELECT taxon_scientific, taxon_common, detected_at_ms FROM detections WHERE id = ?",
+            arrayOf(detectionId.toString())
+        ).use { if (it.moveToFirst()) Triple(it.getString(0), it.getString(1), it.getLong(2)) else null }
+            ?: return null
+
+        db.insert("verifications", null, ContentValues().apply {
+            put("detection_id", detectionId); put("verdict", verdict)
+            put("verified_at", Detection.iso(System.currentTimeMillis()))
+            if (note != null) put("note", note)
+        })
+        if (verdict == "yes") {
+            val already = readableDatabase.rawQuery(
+                "SELECT first_confirmed_at FROM species_status WHERE scientific_name = ?", arrayOf(row.first)
+            ).use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
+            if (already == null) {
+                db.update("species_status", ContentValues().apply {
+                    put("status", "confirmed")
+                    put("first_confirmed_at", Detection.iso(System.currentTimeMillis()))
+                    put("lifer_detection_id", detectionId)
+                }, "scientific_name = ?", arrayOf(row.first))
+            }
+        } else if (verdict == "no") {
+            // A rejection marks the SPECIES rejected only while it has never been confirmed;
+            // one bad clip must not retract a lifer earned from a good one.
+            db.update("species_status", ContentValues().apply { put("status", "rejected") },
+                "scientific_name = ? AND first_confirmed_at IS NULL", arrayOf(row.first))
+        }
+        return speciesStatus(row.first)
+    }
+
+    fun speciesStatus(scientific: String): SpeciesStatus? =
+        readableDatabase.rawQuery(
+            "SELECT scientific_name, common_name, status, first_detected_at, first_confirmed_at, " +
+            "lifer_detection_id, best_detection_id, total_detections FROM species_status WHERE scientific_name = ?",
+            arrayOf(scientific)
+        ).use { if (!it.moveToFirst()) null else SpeciesStatus(
+            it.getString(0), it.getString(1) ?: "", it.getString(2),
+            if (it.isNull(3)) null else it.getString(3), if (it.isNull(4)) null else it.getString(4),
+            if (it.isNull(5)) null else it.getLong(5), if (it.isNull(6)) null else it.getLong(6),
+            it.getInt(7)) }
+
+    fun lifeList(): List<SpeciesStatus> {
+        val out = ArrayList<SpeciesStatus>()
+        readableDatabase.rawQuery(
+            "SELECT scientific_name, common_name, status, first_detected_at, first_confirmed_at, " +
+            "lifer_detection_id, best_detection_id, total_detections FROM species_status " +
+            "ORDER BY (status='confirmed') DESC, first_confirmed_at ASC, common_name ASC", null
+        ).use { while (it.moveToNext()) out += SpeciesStatus(
+            it.getString(0), it.getString(1) ?: "", it.getString(2),
+            if (it.isNull(3)) null else it.getString(3), if (it.isNull(4)) null else it.getString(4),
+            if (it.isNull(5)) null else it.getLong(5), if (it.isNull(6)) null else it.getLong(6),
+            it.getInt(7)) }
+        return out
+    }
+
+    /** BirdNET's 48-week convention: four weeks per month, the 4th absorbing the remainder.
+     *  Must match how the priors were generated or every lookup is silently off by weeks. */
+    fun weekOf(atMs: Long): Int {
+        val c = java.util.Calendar.getInstance().apply { timeInMillis = atMs }
+        val month = c.get(java.util.Calendar.MONTH) + 1
+        val day = c.get(java.util.Calendar.DAY_OF_MONTH)
+        return (month - 1) * 4 + minOf(3, (day - 1) / 7) + 1
+    }
+
+    /** All priors for one week, keyed by scientific name. Read once per query rather than
+     *  once per row — 6522 rows is one cheap indexed scan, against thousands of lookups. */
+    fun priorsForWeek(week: Int): Map<String, Double> {
+        val m = HashMap<String, Double>(7000)
+        runCatching {
+            readableDatabase.rawQuery(
+                "SELECT scientific_name, prior FROM species_prior WHERE week = ?",
+                arrayOf(week.toString())
+            ).use { while (it.moveToNext()) m[it.getString(0)] = it.getDouble(1) }
+        }
+        return m
+    }
+
+    /** Local occurrence prior for a species in a given BirdNET week (1-48), or null if the
+     *  meta-model has not been run for this station yet. */
+    fun prior(scientific: String, week: Int): Double? =
+        readableDatabase.rawQuery(
+            "SELECT prior FROM species_prior WHERE scientific_name = ? AND week = ?",
+            arrayOf(scientific, week.toString())
+        ).use { if (it.moveToFirst()) it.getDouble(0) else null }
+
+    fun priorCount(): Int =
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM species_prior", null)
+            .use { if (it.moveToFirst()) it.getInt(0) else 0 }
+
+    fun replacePriors(entries: List<Triple<String, Int, Double>>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("species_prior", null, null)
+            for ((sci, week, p) in entries) db.insertWithOnConflict("species_prior", null,
+                ContentValues().apply { put("scientific_name", sci); put("week", week); put("prior", p) },
+                SQLiteDatabase.CONFLICT_REPLACE)
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+    }
+
+    /**
+     * The verification queue: unverified detections of species not yet decided.
+     *
+     * Order is rarity first, then score — the highest-stakes decisions while attention is
+     * fresh. Only rows that still HAVE a clip are offered, since a detection cannot be
+     * verified by ear without its audio, and the clip floor means not every row has one.
+     */
+    fun verifyQueue(settings: Settings, week: Int, limit: Int): List<Pair<DetectionRow, Double?>> {
+        val rows = listDetections(sinceMs = null, date = null, group = null, state = "confirmed",
+            minConf = null, limit = 2000, settings = settings)
+        val decided = HashSet<String>()
+        readableDatabase.rawQuery(
+            "SELECT scientific_name FROM species_status WHERE status IN ('confirmed','rejected')", null
+        ).use { while (it.moveToNext()) decided.add(it.getString(0)) }
+        val verified = HashSet<Long>()
+        readableDatabase.rawQuery("SELECT DISTINCT detection_id FROM verifications", null)
+            .use { while (it.moveToNext()) verified.add(it.getLong(0)) }
+
+        return rows.asSequence()
+            .filter { it.clipPath != null && it.id !in verified && it.taxon.scientific !in decided }
+            .distinctBy { it.taxon.scientific }          // one card per species, not per row
+            .map { it to prior(it.taxon.scientific, week) }
+            .sortedWith(compareBy({ it.second ?: 1.0 }, { -it.first.confidence }))
+            .take(limit)
+            .toList()
+    }
+
+    /** What a "clear all" would destroy, so the caller can say so before doing it. The old
+     *  button reported nothing and left photos and orphaned clips behind, which is how it
+     *  came to be described as "it didn't clear everything". */
+    data class ClearPreview(val detections: Int, val clips: Int, val confirmedSpecies: Int, val pinnedClips: Int)
+
+    fun clearPreview(): ClearPreview {
+        fun count(sql: String): Int =
+            readableDatabase.rawQuery(sql, null).use { if (it.moveToFirst()) it.getInt(0) else 0 }
+        return ClearPreview(
+            detections = count("SELECT COUNT(*) FROM detections"),
+            clips = count("SELECT COUNT(*) FROM detections WHERE clip_path IS NOT NULL"),
+            confirmedSpecies = count("SELECT COUNT(*) FROM species_status WHERE status = 'confirmed'"),
+            pinnedClips = pinnedDetectionIds().size
+        )
+    }
+
+    /**
+     * @param keepLifeList when true (the default), confirmed species, their verifications
+     *        and their pinned clips survive — "clear what I observed" rather than "destroy
+     *        the record of what I confirmed". A life list represents human decisions that
+     *        no amount of re-recording can reproduce, so destroying it is a separate,
+     *        explicit act rather than a side effect of tidying up the feed.
+     */
+    fun clearAll(keepLifeList: Boolean = true) {
+        val pinned = if (keepLifeList) pinnedDetectionIds() else emptySet()
+        readableDatabase.rawQuery(
+            "SELECT id, clip_path FROM detections WHERE clip_path IS NOT NULL", null
+        ).use {
+            while (it.moveToNext()) {
+                if (it.getLong(0) in pinned) continue
+                runCatching { File(it.getString(1)).delete() }
+            }
+        }
+        if (pinned.isEmpty()) {
+            writableDatabase.delete("detections", null, null)
+        } else {
+            writableDatabase.delete("detections", "id NOT IN (${pinned.joinToString(",")})", null)
+        }
         writableDatabase.delete("species_settings", null, null)
         writableDatabase.delete("outbox_delivery", null, null)
+        if (!keepLifeList) {
+            writableDatabase.delete("species_status", null, null)
+            writableDatabase.delete("verifications", null, null)
+        } else {
+            // Candidates are observations and go; confirmed and rejected are decisions and stay.
+            writableDatabase.delete("species_status", "status = 'candidate'", null)
+        }
     }
 }
