@@ -82,12 +82,28 @@ class AudioCapture(private val ctx: Context) {
     /** Starts a dedicated capture thread. [onWindow] is called on that thread — the
      *  caller (StationService) does inference synchronously there; BirdNET's ~100-200 ms
      *  per window is well inside the 1.5 s hop budget, so a second thread would only
-     *  add complexity for no latency win. */
-    fun start(onWindow: (Window) -> Unit, onError: (Throwable) -> Unit) {
+     *  add complexity for no latency win.
+     *
+     *  [onPcm] is a SEPARATE, CONTINUOUS tap: `(buffer, sampleCount, captureRate)` for
+     *  every block AudioRecord returns, each sample passed exactly once, in capture order,
+     *  before any windowing. It exists because the [onWindow] stream is unusable for
+     *  anything that renders audio over time — consecutive windows share 50% of their
+     *  samples (WINDOW_S 3.0 against HOP_S 1.5), so a consumer that drew them would draw
+     *  half of all audio twice and tear. The live spectrogram is fed from here instead.
+     *
+     *  The buffer handed to [onPcm] is REUSED on the next read — copy anything you keep.
+     *  [onPcm] runs on the capture thread and must return promptly; time spent there is
+     *  time not spent reading, and AudioRecord's ring is only a few hundred ms deep.
+     *
+     *  The tap is raw: NOT resampled to MODEL_RATE, hence the rate argument. Resampling it
+     *  would spend CPU converting audio that is about to be reduced to 256 bins anyway,
+     *  and the consumer can derive its frequency mapping from the true rate for free. */
+    fun start(onWindow: (Window) -> Unit, onError: (Throwable) -> Unit,
+              onPcm: ((ShortArray, Int, Int) -> Unit)? = null) {
         if (running.getAndSet(true)) return
         thread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            try { captureLoop(onWindow) } catch (e: Throwable) { running.set(false); onError(e) }
+            try { captureLoop(onWindow, onPcm) } catch (e: Throwable) { running.set(false); onError(e) }
         }, "biomon-audio-capture").apply { start() }
     }
 
@@ -97,7 +113,7 @@ class AudioCapture(private val ctx: Context) {
         thread = null
     }
 
-    private fun captureLoop(onWindow: (Window) -> Unit) {
+    private fun captureLoop(onWindow: (Window) -> Unit, onPcm: ((ShortArray, Int, Int) -> Unit)?) {
         val supported = unprocessedSupported()
         val source = if (supported) MediaRecorder.AudioSource.UNPROCESSED
                      else MediaRecorder.AudioSource.VOICE_RECOGNITION
@@ -132,6 +148,9 @@ class AudioCapture(private val ctx: Context) {
             while (running.get()) {
                 val n = rec.read(readBuf, 0, readBuf.size)
                 if (n <= 0) continue
+                // Before windowing, so the tap sees every sample exactly once and in order.
+                // Anything downstream of the ring below has already been overlapped.
+                onPcm?.invoke(readBuf, n, captureRate)
                 // shift-append into the ring (simple, adequate at this data rate: ~96 KB/s)
                 if (ringFill + n > ring.size) {
                     val drop = ringFill + n - ring.size

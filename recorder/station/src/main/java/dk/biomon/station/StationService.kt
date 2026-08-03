@@ -58,6 +58,7 @@ class StationService : Service(), HealthProvider {
     private lateinit var clipsDir: File
     private var birdNet: BirdNet? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    @Volatile private var spectrogram: Spectrogram? = null
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val serviceStartedAtMs = System.currentTimeMillis()
@@ -162,9 +163,30 @@ class StationService : Service(), HealthProvider {
             updateNotification("Microphone permission needed")
             return
         }
-        audioCapture.start(onWindow = ::onWindow, onError = ::onCaptureError)
+        audioCapture.start(onWindow = ::onWindow, onError = ::onCaptureError, onPcm = ::onPcm)
         listening = true
         updateNotification("Listening…")
+    }
+
+    /**
+     * The continuous capture tap — every sample exactly once, before windowing. Feeds the
+     * live spectrogram only; nothing here touches inference or the database.
+     *
+     * The Spectrogram is built HERE rather than in onCreate because its every frequency
+     * mapping depends on the capture rate, and that is not known until AudioCapture has
+     * negotiated it with the hardware (48 kHz is requested, not guaranteed). Rebuilding on
+     * a rate change also covers a capture restart that lands on a different rate, which
+     * would otherwise silently mislabel every axis on the display.
+     */
+    private fun onPcm(buf: ShortArray, n: Int, captureRate: Int) {
+        var s = spectrogram
+        if (s == null || s.sampleRate != captureRate) {
+            s = Spectrogram(captureRate) { atSeconds, magnitudes ->
+                httpServer.broadcastSpectrogramColumn(atSeconds, magnitudes)
+            }
+            spectrogram = s
+        }
+        s.accept(buf, n, System.currentTimeMillis())
     }
 
     private fun onCaptureError(e: Throwable) {
@@ -173,7 +195,7 @@ class StationService : Service(), HealthProvider {
         updateNotification("Capture error — retrying")
         scope.launch {
             kotlinx.coroutines.delay(5000)
-            if (audioCapture.hasPermission()) audioCapture.start(::onWindow, ::onCaptureError).also { listening = true }
+            if (audioCapture.hasPermission()) audioCapture.start(::onWindow, ::onCaptureError, ::onPcm).also { listening = true }
         }
     }
 
@@ -363,6 +385,19 @@ class StationService : Service(), HealthProvider {
                 .put("duty_pct", Math.round(lastInferenceMs.get() / (AudioCapture.HOP_S * 1000) * 1000) / 10.0)
                 .put("windows_total", windowsTotal.get())
                 .put("windows_skipped_thermal", windowsSkippedThermal.get()))
+            .put("spectrogram", spectrogram.let { s ->
+                JSONObject()
+                    .put("running", s != null)
+                    .put("sample_rate", s?.sampleRate ?: JSONObject.NULL)
+                    .put("bins", Spectrogram.BINS)
+                    .put("target_cps", Spectrogram.COLUMNS_PER_SECOND)
+                    // Measured against the wall clock, so it drops if the capture thread
+                    // stalls — the whole point of reporting it rather than the target.
+                    .put("measured_cps", s?.columnsPerSecond ?: 0.0)
+                    .put("frames_emitted", s?.framesEmitted?.get() ?: 0L)
+                    .put("clients", httpServer.spectrogramClients())
+                    .put("frames_dropped", httpServer.spectrogramDropped())
+            })
             .put("thermal", JSONObject().put("battery_c", battTempTenths / 10.0)
                 .put("status", thermalName).put("throttled", thermalStatus >= PowerManager.THERMAL_STATUS_MODERATE))
             .put("storage", JSONObject().put("clips_bytes", clipsBytes).put("cap_bytes", CLIP_CAP_BYTES)

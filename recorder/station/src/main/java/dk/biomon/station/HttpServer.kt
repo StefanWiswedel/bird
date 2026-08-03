@@ -53,6 +53,31 @@ class HttpServer(
         @Volatile var alive = true
     }
 
+    /**
+     * One live spectrogram subscriber.
+     *
+     * THE QUEUE IS DELIBERATELY TINY. Columns are produced on the capture thread at 30/s
+     * and are only interesting while they are current — a column that arrives late is not
+     * late data, it is wrong data, because the client draws it at the right-hand edge as
+     * though it were now. So the queue holds a fifth of a second and [drop] discards the
+     * OLDEST frame when it overflows: a viewer on a weak signal sees a jump rather than a
+     * progressively growing lag, and the capture thread never blocks on a socket write.
+     */
+    private class WsClient(val sock: Socket, val out: OutputStream) {
+        val queue = java.util.concurrent.ArrayBlockingQueue<ByteArray>(6)
+        @Volatile var alive = true
+        var dropped = 0L
+        fun offer(frame: ByteArray) {
+            if (!queue.offer(frame)) { queue.poll(); dropped++; queue.offer(frame) }
+        }
+    }
+
+    private val wsClients = CopyOnWriteArrayList<WsClient>()
+
+    /** Live subscriber count and total frames dropped to backpressure, for /api/health. */
+    fun spectrogramClients(): Int = wsClients.size
+    fun spectrogramDropped(): Long = wsClients.sumOf { it.dropped }
+
     fun start() {
         if (running.getAndSet(true)) return
         serverSocket = ServerSocket()
@@ -71,12 +96,120 @@ class HttpServer(
         running.set(false)
         runCatching { serverSocket?.close() }
         sseClients.forEach { it.alive = false }
+        wsClients.forEach { it.alive = false; runCatching { it.sock.close() } }
         pool.shutdownNow()
     }
 
     /** Called by StationService right after a detection is stored. */
     fun broadcastDetection(det: Detection, photo: JSONObject?) {
         broadcast("detection", det.json(station.json(), photo))
+    }
+
+    /**
+     * Push one spectrogram column to every live subscriber. Called on the CAPTURE THREAD,
+     * 30x/second, so this method must never block or allocate heavily — it builds the frame
+     * once, hands the same immutable array to every client, and returns. Actual socket
+     * writes happen on each client's own writer thread.
+     *
+     * Wire format (station/API.md), 265-byte payload:
+     *   byte 0      uint8    message type, 0x01 = spectrogram column
+     *   bytes 1-8   float64  timestamp, epoch SECONDS, little-endian
+     *   bytes 9-264 uint8[256] magnitudes, low frequency -> high
+     */
+    fun broadcastSpectrogramColumn(atSeconds: Double, magnitudes: ByteArray) {
+        if (wsClients.isEmpty()) return
+        val payload = ByteArray(1 + 8 + magnitudes.size)
+        payload[0] = 0x01
+        val bits = java.lang.Double.doubleToLongBits(atSeconds)
+        for (i in 0 until 8) payload[1 + i] = ((bits shr (8 * i)) and 0xFF).toByte()   // little-endian
+        System.arraycopy(magnitudes, 0, payload, 9, magnitudes.size)
+        val frame = wsBinaryFrame(payload)
+        for (c in wsClients) if (c.alive) c.offer(frame)
+    }
+
+    /** FIN + binary opcode, never masked (RFC 6455: servers must not mask). 265 bytes needs
+     *  the 126 + 16-bit extended-length form; the 7-bit form stops at 125. */
+    private fun wsBinaryFrame(payload: ByteArray): ByteArray {
+        val n = payload.size
+        return if (n <= 125) {
+            ByteArray(2 + n).also { it[0] = 0x82.toByte(); it[1] = n.toByte()
+                System.arraycopy(payload, 0, it, 2, n) }
+        } else {
+            ByteArray(4 + n).also { it[0] = 0x82.toByte(); it[1] = 126
+                it[2] = ((n shr 8) and 0xFF).toByte(); it[3] = (n and 0xFF).toByte()
+                System.arraycopy(payload, 0, it, 4, n) }
+        }
+    }
+
+    /**
+     * RFC 6455 upgrade, then a dedicated writer loop for this subscriber.
+     *
+     * The reader runs on its own thread purely so a client CLOSE is noticed promptly — the
+     * writer would otherwise only discover a dead socket on its next write, which on a live
+     * view with a stalled producer could be never, leaking a thread per reconnect.
+     */
+    private fun handleWebSocket(sock: Socket, req: Req) {
+        val key = req.headers["sec-websocket-key"] ?: run { sock.close(); return }
+        val accept = java.security.MessageDigest.getInstance("SHA-1")
+            .digest((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").toByteArray(Charsets.US_ASCII))
+            .let { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }
+
+        val out = sock.getOutputStream()
+        out.write(("HTTP/1.1 101 Switching Protocols\r\n" +
+                   "Upgrade: websocket\r\nConnection: Upgrade\r\n" +
+                   "Sec-WebSocket-Accept: $accept\r\n\r\n").toByteArray())
+        out.flush()
+
+        // No read timeout: a live view is idle in the client->server direction by design,
+        // and the 20 s request timeout would otherwise kill every subscriber.
+        sock.soTimeout = 0
+        sock.tcpNoDelay = true          // 265-byte frames at 30/s; Nagle would batch and lag them
+        val client = WsClient(sock, out)
+        wsClients.add(client)
+
+        pool.execute { runCatching { wsReadLoop(sock, client) }; client.alive = false }
+        try {
+            while (running.get() && client.alive) {
+                val frame = client.queue.poll(1, java.util.concurrent.TimeUnit.SECONDS) ?: continue
+                out.write(frame); out.flush()
+            }
+        } catch (e: Exception) {
+            // Broken pipe on a LAN viewer that closed a tab. Not an error worth logging.
+        } finally {
+            client.alive = false
+            wsClients.remove(client)
+            runCatching { sock.close() }
+        }
+    }
+
+    /** Drains client->server frames. Handles close and ping; ignores everything else, since
+     *  this endpoint takes no client input. Client frames are always masked. */
+    private fun wsReadLoop(sock: Socket, client: WsClient) {
+        val input = sock.getInputStream()
+        while (client.alive) {
+            val b0 = input.read(); if (b0 < 0) break
+            val b1 = input.read(); if (b1 < 0) break
+            val opcode = b0 and 0x0F
+            val masked = (b1 and 0x80) != 0
+            var len = (b1 and 0x7F).toLong()
+            if (len == 126L) {
+                len = ((input.read() shl 8) or input.read()).toLong()
+            } else if (len == 127L) {
+                len = 0; for (i in 0 until 8) len = (len shl 8) or input.read().toLong()
+            }
+            val mask = ByteArray(4)
+            if (masked) { var r = 0; while (r < 4) { val n = input.read(mask, r, 4 - r); if (n < 0) return; r += n } }
+            val payload = ByteArray(len.toInt().coerceAtMost(1 shl 16))
+            var read = 0
+            while (read < payload.size) { val n = input.read(payload, read, payload.size - read); if (n < 0) return; read += n }
+            if (masked) for (i in payload.indices) payload[i] = (payload[i].toInt() xor mask[i % 4].toInt()).toByte()
+            when (opcode) {
+                0x8 -> { runCatching { client.out.write(byteArrayOf(0x88.toByte(), 0)); client.out.flush() }; return }
+                0x9 -> client.offer(ByteArray(2 + payload.size).also {          // ping -> pong
+                    it[0] = 0x8A.toByte(); it[1] = payload.size.toByte()
+                    System.arraycopy(payload, 0, it, 2, payload.size) })
+            }
+        }
     }
 
     private fun statusTicker() {
@@ -103,6 +236,10 @@ class HttpServer(
         if (req == null) { sock.close(); return }
 
         if (req.path == "/api/events") { handleSse(sock); return }
+        // Checked before the normal route table because a WebSocket upgrade takes the socket
+        // over entirely — after the 101 there is no more HTTP on this connection.
+        if (req.path == "/api/spectrogram" &&
+            req.headers["upgrade"]?.lowercase() == "websocket") { handleWebSocket(sock, req); return }
 
         val out = BufferedOutputStream(sock.getOutputStream())
         try {
@@ -168,6 +305,7 @@ class HttpServer(
         when {
             req.method == "OPTIONS" -> { writeStatus(out, 204); writeCors(out); out.write("Content-Length: 0\r\n\r\n".toByteArray()) }
             p == "/" || p == "/index.html" -> serveAsset(out, "www/index.html", "text/html; charset=utf-8")
+            p == "/tokens.css" -> serveAsset(out, "www/tokens.css", "text/css; charset=utf-8")
             p == "/api/health" -> writeJson(out, 200, health.health())
             p == "/api/settings" && req.method == "GET" -> writeJson(out, 200, settings.get().json())
             p == "/api/settings" && req.method == "POST" -> {
