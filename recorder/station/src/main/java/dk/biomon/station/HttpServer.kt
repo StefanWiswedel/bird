@@ -358,7 +358,20 @@ class HttpServer(
                     limit = (req.query["limit"]?.toIntOrNull() ?: 100).coerceIn(1, 500),
                     settings = st
                 )
-                val arr = jsonArrayOf(rows.map { it.toDetection().json(station.json(), photoJson(it.taxon.key)) })
+                // Life-list status travels with each row so the feed can grey out a species
+                // the observer has already rejected instead of silently dropping it — seeing
+                // the model still produce it is the signal that a threshold override is due.
+                val rejected = db.rejectedSpecies()
+                val confirmedSp = db.lifeList().filter { it.status == "confirmed" }
+                    .map { it.scientific }.toHashSet()
+                val arr = jsonArrayOf(rows.map { r ->
+                    r.toDetection().json(station.json(), photoJson(r.taxon.key)).put("species_status",
+                        when (r.taxon.scientific) {
+                            in rejected -> "rejected"
+                            in confirmedSp -> "confirmed"
+                            else -> "candidate"
+                        })
+                })
                 writeJson(out, 200, JSONObject().put("schema", 1).put("server_ms", System.currentTimeMillis())
                     .put("count", rows.size).put("detections", arr))
             }

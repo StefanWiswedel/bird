@@ -538,8 +538,19 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         }
         val overrides = speciesThresholdOverrides()
         val gapMs = settings.boutGapSeconds * 1000L
+        // A rejected species stops counting toward the day's totals for the same reason it
+        // leaves the species list: the observer already answered the question these numbers
+        // are asking.
+        val rejectedKeys = HashSet<String>()
+        runCatching {
+            readableDatabase.rawQuery(
+                "SELECT DISTINCT d.taxon_key FROM detections d JOIN species_status s " +
+                "ON s.scientific_name = d.taxon_scientific WHERE s.status = 'rejected'", null
+            ).use { while (it.moveToNext()) rejectedKeys.add(it.getString(0)) }
+        }
         return byDate.map { (date, rows) ->
-            val confirmed = rows.groupBy { it.taxonKey }.values.flatMap { forTaxon ->
+            val confirmed = rows.filterNot { it.taxonKey in rejectedKeys }
+                .groupBy { it.taxonKey }.values.flatMap { forTaxon ->
                 // A species qualifies for the day only if its detections form at least
                 // repeatRequired bouts; then every above-threshold row of that species counts.
                 val bouts = countBouts(forTaxon.map { it.atMs }.sorted(), gapMs)
@@ -553,8 +564,10 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
     }
 
     fun summaryForDate(date: String, settings: Settings): DaySummaryData {
+        val rejected = rejectedSpecies()
         val rows = listDetections(sinceMs = null, date = date, group = null, state = "confirmed",
             minConf = null, limit = 100_000, settings = settings)
+            .filter { it.taxon.scientific !in rejected }
         val byHour = IntArray(24)
         val cal = java.util.Calendar.getInstance()
         for (r in rows) { cal.timeInMillis = r.detectedAtMs; byHour[cal.get(java.util.Calendar.HOUR_OF_DAY)]++ }
@@ -570,9 +583,11 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
     fun speciesSummary(settings: Settings): List<SpeciesAgg> {
         val rows = listDetections(sinceMs = null, date = null, group = null, state = "confirmed",
             minConf = null, limit = 200_000, settings = settings)
-        return rows.groupBy { it.taxon.key }.values.map { v ->
-            SpeciesAgg(v[0].taxon, v.size, v.maxOf { it.detectedAtMs }, v.maxOf { it.confidence })
-        }.sortedByDescending { it.count }
+        val rejected = rejectedSpecies()
+        return rows.filter { it.taxon.scientific !in rejected }
+            .groupBy { it.taxon.key }.values.map { v ->
+                SpeciesAgg(v[0].taxon, v.size, v.maxOf { it.detectedAtMs }, v.maxOf { it.confidence })
+            }.sortedByDescending { it.count }
     }
 
     fun clipsBytesTotal(): Long {
@@ -711,6 +726,30 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
                 "scientific_name = ? AND first_confirmed_at IS NULL", arrayOf(row.first))
         }
         return speciesStatus(row.first)
+    }
+
+    /**
+     * Species a human has explicitly rejected.
+     *
+     * A rejection is a STRONGER statement than any score: the observer listened and said
+     * no. So rejected species are excluded from every "what was here" aggregate — the
+     * species list, the day rollups, the top-species panel — even though their detection
+     * rows stay in the database as evidence of what the model did. The rows are the record
+     * of the classifier's behaviour; the species list is a claim about the world, and once
+     * that claim has been checked and refused it must stop being made.
+     *
+     * Deliberately NOT filtered out of the raw feed: seeing a rejected row still appear
+     * (rendered at 45% opacity per the design spec) is how you notice the model is still
+     * producing it, which is exactly what a per-species threshold override is for.
+     */
+    fun rejectedSpecies(): Set<String> {
+        val out = HashSet<String>()
+        runCatching {
+            readableDatabase.rawQuery(
+                "SELECT scientific_name FROM species_status WHERE status = 'rejected'", null
+            ).use { while (it.moveToNext()) out.add(it.getString(0)) }
+        }
+        return out
     }
 
     fun speciesStatus(scientific: String): SpeciesStatus? =

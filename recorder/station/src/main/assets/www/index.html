@@ -27,6 +27,10 @@
   padding: var(--space-12) var(--space-16) var(--space-8);
 }
 .brand { display: flex; flex-direction: column; min-width: 0; }
+/* Dimmer than the station name beside it: present when looked for, invisible otherwise.
+   A build stamp that competes for attention is worse than none. */
+.build-stamp { color: var(--ink-faint); opacity: 0.65; }
+.build-stamp:not(:empty)::before { content: " · "; }
 .brand-name {
   font-family: var(--font-display); font-weight: var(--weight-display);
   font-variation-settings: var(--axes-display); font-optical-sizing: auto;
@@ -294,12 +298,209 @@ main { max-width: 640px; margin: 0 auto; padding: var(--space-24) var(--space-16
 }
 .life.is-lifer { border-color: var(--signal); }   /* lifer — the one place fill-less --signal earns a card border */
 
-/* ------------------------------------------------------------- verify shell */
-.mount {
-  border: 1px dashed var(--line-strong); border-radius: var(--r-md);
-  padding: var(--space-32); text-align: center; color: var(--ink-soft);
-  display: flex; flex-direction: column; gap: var(--space-8); align-items: center;
+/* ------------------------------------------------------------- verify §6
+   One detection at a time, card-stack. Not a list, not a table — a list invites
+   scanning and skipping, and the whole point of this screen is that each decision
+   gets looked at once, properly. */
+.v-wrap { display: flex; flex-direction: column; gap: var(--space-16); }
+
+/* --- the commitment screen. §6: show the remaining queue count BEFORE starting.
+   The count is a promise about how long this will take, so it gets the headline
+   treatment and the session cap sits directly under it. */
+.v-setup { display: flex; flex-direction: column; gap: var(--space-16); }
+.v-bignum {
+  font-family: var(--font-data); font-variant-numeric: tabular-nums;
+  font-size: var(--text-40); line-height: 1; color: var(--ink);
 }
+.v-setup .why { color: var(--ink-soft); font-size: var(--text-13); max-width: 46ch; }
+
+/* --- the card itself */
+.v-card { background: var(--bg-raised); border: 1px solid var(--line); border-radius: var(--r-md); }
+.v-head {
+  display: flex; align-items: center; gap: var(--space-8);
+  padding: var(--space-12) var(--space-16); border-bottom: 1px solid var(--line);
+}
+.v-head .rest { margin-left: auto; }
+/* Progress rule. --ink-faint, not --ember and certainly not --signal: how far through
+   a chore you are is not an event, and colour here would compete with the confirm
+   button sitting 300px below it. */
+.v-bar { height: 2px; background: var(--line); }
+.v-bar i { display: block; height: 100%; background: var(--ink-faint); }
+
+/* MEASURED: with the reference photo as a full-width 128px band, the confirm and reject
+   buttons landed at y=822 on a 375x812 phone — one scroll below the fold, on every
+   single card, for a chore done one-handed outdoors. The photo is a memory aid attached
+   to the name, not evidence, so it became a 96px square beside the name and the card
+   now ends at ~730. The decision is always reachable without scrolling. */
+.v-body { padding: var(--space-16); display: flex; flex-direction: column; gap: var(--space-12); }
+.v-name { display: flex; align-items: center; gap: var(--space-12); }
+.v-name .taxon { flex: 1 1 auto; min-width: 0; }
+/* The species name is the hero content (§1) and this is the largest it appears
+   outside the lifer card. Binomial italic beneath, one step down, --ink-soft. */
+.v-name .common {
+  display: block; font-family: var(--font-display); font-weight: var(--weight-display);
+  font-variation-settings: var(--axes-display); font-optical-sizing: auto;
+  font-size: var(--text-28); line-height: 1.15; color: var(--ink);
+}
+.v-name .common.is-binomial { font-style: italic; }
+.v-name .sci {
+  display: block; font-family: var(--font-display); font-style: italic;
+  font-size: var(--text-18); line-height: 1.3; color: var(--ink-soft);
+}
+.v-flags { display: flex; flex-wrap: wrap; gap: var(--space-8); align-items: center; }
+/* §7 rarity: --signal OUTLINE, never fill. It says "exciting" and "check this
+   carefully" with the same element, which is the point — one mark, both meanings.
+   Rendered only when the station actually has priors; see renderVerifyCard. */
+.v-rare {
+  display: inline-flex; align-items: center; gap: var(--space-4);
+  font-family: var(--font-ui); font-size: var(--text-11);
+  letter-spacing: var(--tracking-label); text-transform: uppercase;
+  color: var(--signal); border: 1px solid var(--signal); border-radius: var(--r-sm);
+  padding: var(--space-4) var(--space-8); background: none;
+}
+.v-why-rare { font-size: var(--text-13); color: var(--ink-soft); }
+
+/* --- the clip. Square corners, --bg-sunken behind, full width (§6), same frame
+   chrome as the live view so the two read as the same instrument. */
+.v-spec { position: relative; background: var(--bg-sunken); border: 1px solid var(--line); border-radius: 0; }
+/* 144px, not the live view's 208px: the whole card has to fit above the fold on a
+   375x812 phone with browser chrome, and 3 s of clip needs far less height than 10 s
+   of scrolling history to stay readable. */
+.v-spec canvas { display: block; width: 100%; height: 144px; }
+.v-spec .pending {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: var(--space-16); color: var(--ink-soft); font-size: var(--text-13);
+}
+/* Playhead. --ink, not a colour: it marks a position, it does not mean anything. */
+.v-playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--ink); opacity: 0.75; display: none; }
+
+.v-transport { display: flex; align-items: center; gap: var(--space-16); }
+/* 64px, well past the 44px floor (§4) — this is the control that gets pressed most,
+   one-handed, in the dark, and it is the only thing on the card that must never be
+   missed by a thumb. */
+.v-play {
+  flex: none; width: var(--space-64); height: var(--space-64); border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-sunken); color: var(--ink);
+  border: 1px solid var(--line-strong); cursor: pointer; appearance: none;
+}
+.v-play:hover { border-color: var(--ink-faint); }
+.v-play svg { width: var(--space-24); height: var(--space-24); }
+.v-time { font-family: var(--font-data); font-variant-numeric: tabular-nums; font-size: var(--text-18); color: var(--ink); }
+.v-transport .label { margin-top: var(--space-4); }
+
+/* --- species reference image. A 96px square beside the name: this is a memory aid for
+   "what does that bird look like", not the evidence being judged — the clip is. Tap to
+   enlarge via the existing lightbox.
+   The CC licence REQUIRES the attribution to be shown wherever the image is, so the
+   credit line is part of the component and cannot be dropped for tidiness. */
+.v-photo {
+  flex: none; width: 96px; height: 96px; border-radius: var(--r-sm);
+  border: 1px solid var(--line); overflow: hidden; background: var(--bg-sunken);
+  display: flex; align-items: center; justify-content: center; color: var(--ink-faint);
+}
+.v-photo img { display: block; width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; }
+.v-photo svg { width: var(--space-32); height: var(--space-32); }
+.v-credit { font-size: var(--text-11); line-height: 1.4; color: var(--ink-faint); margin-top: calc(-1 * var(--space-4)); }
+.v-credit a { color: var(--ink-soft); }
+
+/* --- the stake (§6). Verification is a chore unless the reward is visible at the
+   moment of the decision, so this sits immediately above the buttons and never
+   anywhere else. --signal on the left rule and the ordinal ONLY when the answer
+   would be a lifer, which is one of the three sanctioned uses (§2). */
+.v-stake { border-left: 2px solid var(--line); padding-left: var(--space-12); font-size: var(--text-15); color: var(--ink-soft); }
+.v-stake .who { color: var(--ink); }
+.v-stake em { font-family: var(--font-display); font-style: italic; }
+.v-stake.is-lifer { border-left-color: var(--signal); }
+.v-stake.is-lifer .num {
+  font-family: var(--font-data); font-variant-numeric: tabular-nums; color: var(--signal);
+}
+
+/* --- the two decisions. Confirm is the action that CREATES lifers, which is the
+   third sanctioned use of --signal (§2), and it is the only filled --signal surface
+   in the app — the rarity flag stays outline precisely so the two never blur. */
+.v-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-12); }
+.v-act {
+  appearance: none; cursor: pointer; min-height: var(--space-64);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-4);
+  font-family: var(--font-ui); font-size: var(--text-18); font-weight: 600;
+  border: 1px solid transparent; border-radius: var(--r-sm); background: none;
+}
+.v-act .key {
+  font-family: var(--font-data); font-variant-numeric: tabular-nums;
+  font-size: var(--text-11); opacity: 0.7;
+}
+.v-act.is-confirm { background: var(--signal); color: var(--bg); border-color: var(--signal); }
+.v-act.is-reject  { color: var(--void); border-color: var(--void); }
+.v-act[disabled] { opacity: 0.4; cursor: default; }
+.v-skip { width: 100%; }
+/* Keyboard hints are for desktop only (§6 says the shortcuts are a desktop affordance);
+   on a touch device they are noise printed on the two biggest buttons on the screen. */
+@media (hover: none), (pointer: coarse) { .v-act .key, .v-skip .key { display: none; } }
+
+.v-error { color: var(--ember); font-size: var(--text-13); min-height: var(--space-16); }
+
+/* --- done for now (§9 of the brief). The user has previously been trapped in an
+   unbounded queue and quit at item 45, so the session ENDS, visibly, with what was
+   achieved — not with another card. */
+.v-done { display: flex; flex-direction: column; gap: var(--space-16); }
+.v-tally { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-8); }
+.v-tally .n {
+  display: block; font-family: var(--font-data); font-variant-numeric: tabular-nums;
+  font-size: var(--text-28); line-height: 1.1; color: var(--ink);
+}
+.v-lifers { display: flex; flex-direction: column; gap: var(--space-4); }
+.v-lifers li { list-style: none; font-family: var(--font-display); font-size: var(--text-18); color: var(--signal); }
+.v-lifers li i { font-size: var(--text-13); color: var(--ink-soft); }
+.v-done .row { display: flex; gap: var(--space-8); flex-wrap: wrap; }
+
+/* ------------------------------------------------------------- lifer card §6
+   Full-bleed, the clip's own spectrogram as artwork, the emotional peak of the
+   product. NEVER more than one at a time — one element, reused. */
+.lifer { position: fixed; inset: 0; z-index: 50; display: none; background: var(--bg); }
+.lifer.is-open { display: flex; flex-direction: column; }
+.lifer-art {
+  display: block; width: 100%; flex: 1 1 auto; min-height: 0;
+  background: var(--bg-sunken); border-radius: 0;    /* full-bleed media is square (§4) */
+}
+.lifer-body { flex: none; padding: var(--space-24) var(--space-16) var(--space-32); display: flex; flex-direction: column; gap: var(--space-12); }
+.lifer-eyebrow { color: var(--signal); }             /* a lifer — sanctioned --signal (§2) */
+.lifer-name {
+  font-family: var(--font-display); font-weight: var(--weight-display);
+  font-variation-settings: var(--axes-display); font-optical-sizing: auto;
+  font-size: var(--text-56); line-height: 1.02; color: var(--ink);
+}
+.lifer-name.is-binomial { font-style: italic; }
+.lifer-sci { font-family: var(--font-display); font-style: italic; font-size: var(--text-22); color: var(--ink-soft); }
+/* Specimen label: hairline --signal rules above and below, everything in --font-data. */
+.lifer-meta {
+  border-top: 1px solid var(--signal); border-bottom: 1px solid var(--signal);
+  padding: var(--space-12) 0; margin: var(--space-4) 0 0;
+  display: grid; grid-template-columns: 11ch 1fr; gap: var(--space-4) var(--space-12);
+}
+.lifer-meta dt {
+  font-family: var(--font-ui); font-size: var(--text-11); line-height: 1.5;
+  letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--ink-faint);
+}
+.lifer-meta dd {
+  margin: 0; font-family: var(--font-data); font-variant-numeric: tabular-nums;
+  font-size: var(--text-13); line-height: 1.5; color: var(--ink);
+}
+
+/* §5, the one orchestrated moment: artwork 400ms, then name +120ms, binomial +200ms,
+   metadata +280ms, ease cubic-bezier(0.16,1,0.3,1). Every duration, delay and shift
+   is a token, so prefers-reduced-motion collapses the stagger to a plain fade for
+   free — tokens.css zeroes the delays and --shift-lifer-name. */
+@keyframes liferArt  { from { opacity: 0; } to { opacity: 1; } }
+@keyframes liferRise { from { opacity: 0; transform: translateY(var(--shift-lifer-name)); } to { opacity: 1; transform: none; } }
+.lifer.is-open .lifer-art  { animation: liferArt  var(--dur-lifer-art)  var(--ease-entrance) both; }
+.lifer.is-open .lifer-eyebrow,
+.lifer.is-open .lifer-name { animation: liferRise var(--dur-lifer-step) var(--ease-entrance) var(--delay-lifer-name) both; }
+.lifer.is-open .lifer-sci  { animation: liferRise var(--dur-lifer-step) var(--ease-entrance) var(--delay-lifer-binomial) both; }
+.lifer.is-open .lifer-meta,
+.lifer.is-open .lifer-go   { animation: liferRise var(--dur-lifer-step) var(--ease-entrance) var(--delay-lifer-meta) both; }
+/* The only shadow in the system, and §4 names it as the single exception. */
+.lifer.is-open .lifer-body { box-shadow: 0 0 var(--space-64) var(--signal-wash); }
 
 /* ------------------------------------------------------------- days */
 .chips { display: flex; gap: var(--space-8); overflow-x: auto; padding-bottom: var(--space-8); margin-bottom: var(--space-16); scrollbar-width: none; }
@@ -364,7 +565,15 @@ footer { text-align: center; padding: var(--space-32) var(--space-16); }
   <div class="brandrow">
     <div class="brand">
       <span class="brand-name">Biomon</span>
-      <span class="label brand-station" id="stationName">station</span>
+      <!-- Station name and BUILD STAMP share a line. The stamp is here rather than in
+           Settings (where §6 puts device health) because it is an identity marker, not a
+           metric: it answers "is this the build I just installed", which cost real
+           confusion when four backend builds shipped against an older dashboard and
+           nothing on screen distinguished them. versionName alone cannot answer it — it
+           stayed 0.1.0 throughout — so this shows the commit, with a trailing "+" when the
+           tree was dirty at build time. -->
+      <span class="label brand-station"><span id="stationName">station</span><span
+        id="buildStamp" class="build-stamp"></span></span>
     </div>
     <span class="spacer"></span>
     <span class="pill" id="statusPill"><span class="dot"></span><span id="statusText">connecting</span></span>
@@ -444,14 +653,10 @@ footer { text-align: center; padding: var(--space-32) var(--space-16); }
   <!-- ============================== VERIFY ============================== -->
   <section class="panel" id="panel-verify" role="tabpanel">
     <div class="label eyebrow">Verification queue</div>
-    <p class="note" id="verifyStake">—</p>
-    <!-- SEAM: the card-stack is built separately. It renders into #verifyMount and may
-         assume nothing about this shell except the element id. Queue count is already
-         wired (see refreshVerifyQueue) so the stake is known before starting. -->
-    <div class="mount" id="verifyMount" data-mount="verification-card-stack">
-      <span class="label">mount point</span>
-      <div class="note">Verification card-stack renders here.</div>
-    </div>
+    <!-- Everything below the eyebrow is rendered by renderVerify(). The panel is a
+         state machine (setup / running / done / empty / unreachable) and only ever
+         shows ONE of those, so there is nothing static to leave in the markup. -->
+    <div id="verifyMount" data-mount="verification-card-stack"></div>
   </section>
 
   <!-- ============================== DAYS ============================== -->
@@ -549,6 +754,21 @@ footer { text-align: center; padding: var(--space-32) var(--space-16); }
 <div class="lightbox" id="lightbox">
   <button type="button" class="btn is-quiet" id="lightboxClose" aria-label="Close">Close</button>
   <img id="lightboxImg" src="" alt="">
+</div>
+
+<!-- THE LIFER CARD (§6). One element, reused — "never show more than one at a time" is
+     enforced structurally rather than by remembering to. It lives outside <main> because
+     it is full-bleed and must not inherit main's 640px column or its padding. -->
+<div class="lifer" id="liferCard" role="dialog" aria-modal="true" aria-labelledby="liferName" aria-hidden="true">
+  <canvas class="lifer-art" id="liferArt" role="img"
+          aria-label="Spectrogram of the recording that earned this species its place"></canvas>
+  <div class="lifer-body">
+    <div class="label lifer-eyebrow" id="liferEyebrow">new to the life list</div>
+    <h2 class="lifer-name" id="liferName"></h2>
+    <div class="lifer-sci" id="liferSci"></div>
+    <dl class="lifer-meta" id="liferMeta"></dl>
+    <div class="lifer-go"><button type="button" class="btn" id="liferGo">Continue</button></div>
+  </div>
 </div>
 
 <script>
@@ -684,6 +904,11 @@ const state = {
 const TABS = ["live", "list", "verify", "days", "settings"];
 function selectTab(name) {
   if (!TABS.includes(name)) name = "live";
+  // A clip must not keep playing over another tab. Paused, not torn down: coming back
+  // should find the same card with the same audio, ready to play again.
+  if (name !== "verify" && verify.audio && !verify.audio.paused) {
+    verify.audio.pause(); setPlayIcon(false); stopPlayhead();
+  }
   document.querySelectorAll("nav.tabs button").forEach(b =>
     b.setAttribute("aria-selected", String(b.dataset.tab === name)));
   document.querySelectorAll(".panel").forEach(p =>
@@ -692,6 +917,16 @@ function selectTab(name) {
   if (name === "list" && !state.loaded.list) loadList();
   if (name === "days" && !state.loaded.days) loadDays();
   if (name === "settings" && !state.loaded.settings) loadSettings();
+  // Verify has no "loaded once" flag: a queue read is cheap now (one row per species,
+  // not 500 detections) and the whole point of the tab is that the number is current.
+  // refreshVerifyQueue is a no-op inside its TTL and never touches a session in progress.
+  if (name === "verify") {
+    // A finished session's summary is worth seeing, but only while you are looking at
+    // it. Leaving the tab ends it — otherwise a "done for now" from three hours ago
+    // greets you as if it were news, and hides the queue that has refilled since.
+    if (verify.phase === "done") verify.phase = "loading";
+    refreshVerifyQueue(false).catch(() => {});
+  }
 }
 document.querySelectorAll("nav.tabs button").forEach(b =>
   b.addEventListener("click", () => selectTab(b.dataset.tab)));
@@ -938,6 +1173,9 @@ function renderHealth(h) {
   state.health = h;
   if (state.settings === null) state.settings = h.settings;
   $("stationName").textContent = h.station.name || h.station.id;
+  // Tolerates an older station that predates the app block rather than rendering "undefined".
+  $("buildStamp").textContent = h.app ? `${h.app.version} ${h.app.commit}` : "";
+  if (h.app) $("buildStamp").title = `built ${h.app.built_at}`;
 
   const pill = $("statusPill");
   pill.className = "pill " + (h.listening ? "is-alive" : "is-down");
@@ -984,10 +1222,17 @@ function mostActiveHour(byHour) {
   byHour.forEach((c, i) => { if (c > best && c > 0) { best = c; at = i; } });
   return at;
 }
+/* A lifer is a species CONFIRMED for the first time — first_confirmed_at, not
+   first_detected_at. Hearing something the model guessed at is not an addition to a
+   life list; a person deciding it was real is. The field is an ISO-8601 string with a
+   UTC offset (see §5), never epoch ms. */
 function lifersThisWeek() {
   if (!state.lifeList || !Array.isArray(state.lifeList.species)) return null;
   const cut = Date.now() - 7 * 86400000;
-  return state.lifeList.species.filter(e => e.first_ms && e.first_ms >= cut).length;
+  return state.lifeList.species.filter(e => {
+    const ms = isoMs(e.first_confirmed_at);
+    return ms != null && ms >= cut;
+  }).length;
 }
 
 /* Confidence TIER, not a percentage (§6). PROVISIONAL boundaries: the tier semantics
@@ -1135,39 +1380,83 @@ async function loadTodaySummary() {
 /* =============================================================================
    5. LIST — the life list
 
-   PROVISIONAL ENDPOINTS. Neither of these exists on the station yet:
+     GET /api/life-list  — NOW REAL. It answers the one thing /api/species cannot: the
+     FIRST confirmation, which is what a life list is actually a record of. Its rows are
+     FLAT and carry no `taxon` object:
 
-     GET /api/life-list
-       { "schema": 1, "species": [ { "taxon": {…}, "first_ms": 1785640462000,
-           "first_detection_id": 4127, "count": 31, "photo": {…}|null } ] }
-       What /api/species cannot give: the FIRST confirmation, which is what a life list
-       is actually a record of. Until it exists this tab falls back to /api/species and
-       labels its date "last heard" rather than passing a last-seen off as a first.
+       { "scientific": "Turdus merula", "common": "Eurasian Blackbird",
+         "status": "confirmed"|"candidate"|"rejected",
+         "first_detected_at": "2026-08-01T05:14:22+02:00",   // ISO-8601 with offset
+         "first_confirmed_at": …|null, "lifer_detection_id": …|null,
+         "best_detection_id": …, "total_detections": 31, "photo": {…}|null }
 
-     GET /api/species/plausible
-       { "schema": 1, "species": [ { "taxon": {…}, "prior": 0.31, "basis": "gbif-dk" } ] }
-       Species with a non-trivial local prior that this station has never recorded.
+     The provisional shape this tab was first written against ({taxon:{…}, first_ms})
+     never shipped, so the rows are normalised in lifeEntry() rather than read directly.
+     Dates arrive as ISO strings, not epoch ms — Date.parse handles the offset.
 
-   Both 404 today. A 404 renders a clean empty state and nothing is invented to fill it.
+     GET /api/species/plausible — still 404s. Species with a non-trivial local prior that
+     this station has never recorded. A 404 renders a clean empty state and nothing is
+     invented to fill it.
    ========================================================================== */
+
+/* Same slug rule as HttpServer.slugOf and build_station_species.py, so /api/photo keys
+   line up. The life-list rows carry no taxon.key, and guessing a different slug here
+   would 404 every photo on the tab. */
+function slugOf(scientific) {
+  return String(scientific).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+function isoMs(s) {
+  if (!s) return null;
+  const t = Date.parse(s);
+  return isFinite(t) ? t : null;
+}
+function lifeEntry(e) {
+  const confirmedMs = isoMs(e.first_confirmed_at);
+  return {
+    taxon: { key: slugOf(e.scientific), scientific: e.scientific, common: e.common || "" },
+    photo: e.photo || null,
+    ms: confirmedMs || isoMs(e.first_detected_at),
+    msLabel: confirmedMs ? "first confirmed" : "first heard",
+    // A lifer badge is for the RECENT ones — the border is meant to catch the eye on
+    // this week's additions, not to outline the entire list in --signal.
+    lifer: !!confirmedMs && confirmedMs >= Date.now() - 7 * 86400000,
+    candidate: e.status !== "confirmed",
+  };
+}
 
 async function loadList() {
   state.loaded.list = true;
   state.lifeList = await apiMaybe("/api/life-list");
+  const rows = (state.lifeList && Array.isArray(state.lifeList.species)) ? state.lifeList.species : null;
 
-  // Confirmed side: real data either way. /api/species is confirmed-only by construction
-  // (HttpServer -> speciesSummary -> state="confirmed").
-  let confirmed = [];
-  if (state.lifeList && Array.isArray(state.lifeList.species)) {
-    confirmed = state.lifeList.species.map(e => ({
-      taxon: e.taxon, photo: e.photo || null, ms: e.first_ms, msLabel: "first confirmed",
-      lifer: !!e.first_ms && e.first_ms >= Date.now() - 7 * 86400000,
-    }));
+  let confirmed = [], waiting = [], reachable = true;
+  if (rows) {
+    // Rejected species are deliberately dropped from both lists: a rejection is a
+    // decision, and re-showing it as "waiting" would invite making it twice.
+    confirmed = rows.filter(e => e.status === "confirmed").map(lifeEntry);
+    waiting = rows.filter(e => e.status === "candidate").map(lifeEntry)
+      .sort((a, b) => (b.ms || 0) - (a.ms || 0));
   } else {
+    // A station too old for /api/life-list. /api/species is confirmed-only by
+    // construction (HttpServer -> speciesSummary -> state="confirmed") but knows only
+    // when a species was LAST heard, so the label says so rather than passing a
+    // last-seen off as a first.
     const sp = await apiMaybe("/api/species");
     confirmed = ((sp && sp.species) || []).map(e => ({
       taxon: e.taxon, photo: e.photo || null, ms: e.last_ms, msLabel: "last heard", lifer: false,
     }));
+    const confirmedKeys = new Set(confirmed.map(c => c.taxon.key));
+    const cand = await loadCandidates(false);       // 400 kB — fallback path only
+    reachable = !!cand.rows;
+    const byKey = new Map();
+    for (const d of cand.rows || []) {
+      if (confirmedKeys.has(d.taxon.key)) continue;
+      const prev = byKey.get(d.taxon.key);
+      if (!prev || d.detected_at_ms > prev.ms) {
+        byKey.set(d.taxon.key, { taxon: d.taxon, photo: d.photo || null, ms: d.detected_at_ms, msLabel: "last heard", candidate: true });
+      }
+    }
+    waiting = [...byKey.values()].sort((a, b) => b.ms - a.ms);
   }
 
   $("lifeCount").textContent = confirmed.length ? String(confirmed.length) : "—";
@@ -1175,27 +1464,9 @@ async function loadList() {
   $("lifeConfirmedEmpty").classList.toggle("hidden", confirmed.length > 0);
   renderTiles();   // "new lifers this week" can only be filled once the life list loads
 
-  // Candidate side: derived from real candidate detections, deduped by taxon. Species
-  // already confirmed are removed, or the list would show the same bird twice in two
-  // states, which is the bug the dashed border exists to describe.
-  // Shared cache — see loadCandidates: this call is 400 kB and ~9 s against the station,
-  // so opening this tab must not re-pay it when the Verify badge just did.
-  $("lifeCandidatesEmpty").textContent = "Checking…";
-  $("lifeCandidatesEmpty").classList.remove("hidden");
-  const confirmedKeys = new Set(confirmed.map(c => c.taxon.key));
-  const cand = await loadCandidates(false);
-  const byKey = new Map();
-  for (const d of cand.rows || []) {
-    if (confirmedKeys.has(d.taxon.key)) continue;
-    const prev = byKey.get(d.taxon.key);
-    if (!prev || d.detected_at_ms > prev.ms) {
-      byKey.set(d.taxon.key, { taxon: d.taxon, photo: d.photo || null, ms: d.detected_at_ms, msLabel: "last heard", candidate: true });
-    }
-  }
-  const waiting = [...byKey.values()].sort((a, b) => b.ms - a.ms);
   $("lifeCandidates").innerHTML = waiting.map(lifeCardHtml).join("");
-  $("lifeCandidatesEmpty").textContent = cand.rows
-    ? "Nothing waiting."
+  $("lifeCandidatesEmpty").textContent = reachable
+    ? "Nothing waiting. Everything heard has been decided."
     : "Could not reach the station.";
   $("lifeCandidatesEmpty").classList.toggle("hidden", waiting.length > 0);
 
@@ -1224,28 +1495,783 @@ function lifeCardHtml(e) {
 }
 
 /* =============================================================================
-   6. VERIFY — shell only
+   6. VERIFY — the card-stack
 
-   The card-stack is built separately and mounts into #verifyMount. What belongs here
-   is the commitment: §6 says show the remaining queue count BEFORE starting, because
-   verification is a chore unless the size of it is known up front.
+   One detection at a time. Not a list, not a table: a list invites scanning and
+   batch-clicking, and this screen exists so that each decision is actually looked at.
+
+   THE QUEUE IS ONE CARD PER SPECIES, NOT PER DETECTION. The station's verifyQueue()
+   takes the strongest undecided detection of each undecided species and drops the rest
+   (Database.kt: `.distinctBy { it.taxon.scientific }`). That is not an optimisation, it
+   is the only workable design: one noise source on this balcony produced 3,640 rows of
+   a single species in 19 hours, and a per-detection queue would have asked about that
+   bird 3,640 times. Every count on this screen is therefore a count of SPECIES, and the
+   copy says "species" and never "detections".
+
+   THE OLD BADGE WAS ALSO WRONG, and expensively so. It counted candidate ROWS via
+   `GET /api/detections?state=candidate&limit=500` — 402 kB and 9.4 s against the
+   balcony station, on a phone already spending ~190 ms of every 1.5 s hop inside
+   BirdNET — and the number it printed ("500+") answered a question nobody asked. The
+   badge now comes from /api/verify/queue, which is one small response and the same
+   number the user is about to commit to. loadCandidates() survives below only as the
+   List tab's fallback for a station too old to have /api/life-list.
    ========================================================================== */
 
-/* THE CANDIDATE QUEUE IS EXPENSIVE. There is no count-only endpoint — /api/detections
-   returns `count` for the rows it actually sends, not a total — so the queue size can
-   only be learned by pulling the rows. Measured against the balcony station:
+const VERIFY_LIMIT = 100;               // HttpServer coerces `limit` into 1..100
+const VERIFY_TTL_MS = 60 * 1000;
+const CAP_CHOICES = [10, 25, 0];        // 0 = "all"; see verify.cap
+const CAP_DEFAULT = 10;
+
+const verify = {
+  queue: [],            // detection objects + prior / rarity_flag / would_be_lifer
+  count: 0,             // what the server returned; may be capped at VERIFY_LIMIT
+  capped: false,
+  priors: false,        // priors_available — false means rarity is UNKNOWN, not false
+  week: null,           // BirdNET week the priors were read for; the flag is week-specific
+  lifeSize: 0,          // life_list_size, kept current from every verdict response
+  reachable: true,
+  at: 0,                // when the queue was last fetched
+  inflight: null,
+
+  phase: "loading",     // loading | empty | offline | setup | running | done
+  cap: CAP_DEFAULT,
+  i: 0,                 // index into queue for THIS session
+  tally: { yes: 0, no: 0, skip: 0, lifers: [] },
+  busy: false,          // a verdict is in flight — blocks double-submits and hotkeys
+
+  audio: null,          // HTMLAudioElement for the current clip
+  clipUrl: null,        // object URL backing it; revoked on every card change
+  cols: null,           // the current clip's spectrogram columns, kept so the lifer
+                        // card can repaint the same artwork at a different size
+  raf: 0,
+};
+
+/* ---------------------------------------------------------------- fetching */
+
+async function loadVerifyQueue(force) {
+  const fresh = verify.at && (Date.now() - verify.at) < VERIFY_TTL_MS;
+  if (fresh && !force) return;
+  if (verify.inflight) return verify.inflight;
+  verify.inflight = (async () => {
+    const q = await apiMaybe(`/api/verify/queue?limit=${VERIFY_LIMIT}`);
+    if (q && Array.isArray(q.queue)) {
+      verify.queue = q.queue;
+      verify.count = q.count;
+      verify.capped = q.count >= VERIFY_LIMIT;
+      verify.priors = !!q.priors_available;
+      verify.week = typeof q.week === "number" ? q.week : null;
+      verify.lifeSize = q.life_list_size || 0;
+      verify.reachable = true;
+      verify.at = Date.now();
+    } else {
+      // A 404 is an old station build, a network error is a dropped phone. Neither is
+      // an empty queue, and showing "nothing waiting" for either would be a lie.
+      verify.reachable = false;
+    }
+    verify.inflight = null;
+  })();
+  return verify.inflight;
+}
+
+/* Badge + panel. Never disturbs a session in progress: the 5-minute interval firing
+   mid-decision must not swap the card out from under the user's thumb. */
+async function refreshVerifyQueue(force) {
+  const running = verify.phase === "running";
+  await loadVerifyQueue(force);
+
+  const badge = $("verifyBadge");
+  if (!verify.reachable) {
+    badge.hidden = true;
+  } else {
+    // A full page means "at least this many", not "exactly this many" — the server
+    // truncates at VERIFY_LIMIT and printing a bare 100 would claim a precision the
+    // query cannot support. This is the number the user decides whether to start on.
+    badge.textContent = verify.capped ? verify.count + "+" : String(verify.count);
+    badge.hidden = verify.count === 0;
+  }
+  if (running) return;                  // card on screen: badge only, no re-render
+
+  if (!verify.reachable) verify.phase = "offline";
+  else if (verify.phase !== "done") verify.phase = verify.count === 0 ? "empty" : "setup";
+  renderVerify();
+}
+
+function queueLabel() { return verify.capped ? verify.count + "+" : String(verify.count); }
+/* How many cards this session will ask for. cap 0 means "all", and "all" still means
+   "all of the at-most-100 the server sent", never an unbounded promise. */
+function sessionTotal() {
+  const left = verify.queue.length;
+  return verify.cap === 0 ? left : Math.min(verify.cap, left);
+}
+
+/* ---------------------------------------------------------------- rendering */
+
+function renderVerify() {
+  const mount = $("verifyMount");
+  stopClip();
+  if (verify.phase === "loading") { mount.innerHTML = `<div class="empty">Reading the queue…</div>`; return; }
+  if (verify.phase === "offline") {
+    mount.innerHTML = `<div class="empty">Could not reach the station's verification queue.
+      Nothing has been lost — try again when it is back.</div>`;
+    return;
+  }
+  if (verify.phase === "empty") {
+    mount.innerHTML = `<div class="empty">Nothing waiting. Every species this station has
+      heard is either on the life list or has been ruled out.</div>`;
+    return;
+  }
+  if (verify.phase === "done") { renderVerifyDone(mount); return; }
+  if (verify.phase === "setup") { renderVerifySetup(mount); return; }
+  renderVerifyCard(mount);
+}
+
+function renderVerifySetup(mount) {
+  const n = verify.count;
+  // §7: if the station has no priors, rarity is UNKNOWN. Say that, rather than letting
+  // an absent flag read as "nothing here is rare" — a false negative dressed as silence.
+  const priorNote = verify.priors ? "" :
+    `<div class="note">This station has no local occurrence priors yet, so nothing can be
+     flagged as rare. Absence of a flag here means unknown, not common.</div>`;
+  mount.innerHTML = `
+    <div class="card v-setup">
+      <div>
+        <span class="v-bignum">${esc(queueLabel())}</span>
+        <div class="label" style="margin-top:var(--space-8)">species waiting</div>
+      </div>
+      <div class="why">One card per species, strongest recording first — not one per
+        detection. A single noise source once produced 3,640 rows of one bird here; this
+        asks about that bird once.</div>
+      ${priorNote}
+      <div>
+        <div class="label" style="margin-bottom:var(--space-8)">How many now</div>
+        <div class="seg" role="group" aria-label="Session length" id="capSeg">
+          ${CAP_CHOICES.map(c => `<button type="button" data-cap="${c}" aria-pressed="${c === verify.cap}">
+            ${c === 0 ? "All " + esc(queueLabel()) : c}</button>`).join("")}
+        </div>
+        <div class="note" style="margin-top:var(--space-8)">The session stops there and tells
+          you what you got. You are never handed an endless stack.</div>
+      </div>
+      <div><button type="button" class="btn" id="startVerify"
+        style="min-height:var(--space-64);font-size:var(--text-18)">Start verifying</button></div>
+    </div>`;
+
+  $("capSeg").addEventListener("click", e => {
+    const b = e.target.closest("button[data-cap]");
+    if (!b) return;
+    verify.cap = parseInt(b.dataset.cap, 10);
+    $("capSeg").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  });
+  $("startVerify").addEventListener("click", () => {
+    verify.i = 0;
+    verify.tally = { yes: 0, no: 0, skip: 0, lifers: [] };
+    verify.phase = "running";
+    renderVerify();
+  });
+}
+
+function renderVerifyCard(mount) {
+  const card = verify.queue[verify.i];
+  if (!card) { verify.phase = "done"; renderVerify(); return; }
+
+  const total = sessionTotal();
+  const pos = verify.i + 1;
+  const name = card.taxon.common || card.taxon.scientific;
+
+  // §7: only claim rarity when the station can actually assert it.
+  const rare = verify.priors && card.rarity_flag;
+  const priorLine = rare
+    ? `<div class="v-why-rare">Low local prior${
+        verify.week != null ? ` for week <span class="data">${verify.week}</span>` : ""}${
+        card.prior != null ? ` — <span class="data">${card.prior.toFixed(3)}</span>` : ""
+      }. Exciting and worth a second listen; both meanings, same mark.</div>`
+    : "";
+
+  // The stake (§6). life_list_size + 1 is the number this bird would take.
+  const nextNum = verify.lifeSize + 1;
+  const stake = card.would_be_lifer
+    ? `<div class="v-stake is-lifer">Confirming adds <span class="who">${esc(name)}</span>
+         to your life list — <span class="num">#${nextNum}</span>. It would be a
+         <strong>lifer</strong>: the first time this station has ever confirmed it.</div>`
+    : `<div class="v-stake">Confirming adds another confirmed record of
+         <span class="who">${esc(name)}</span>. It is already on your life list.</div>`;
+
+  const secs = card.clip ? card.clip.seconds : null;
+
+  mount.innerHTML = `
+    <div class="v-wrap">
+      <div class="v-card">
+        <div class="v-head">
+          <span class="label"><span class="data">${pos}</span> of <span class="data">${total}</span></span>
+          <span class="label rest"><span class="data">${esc(queueLabel())}</span> in the queue</span>
+        </div>
+        <div class="v-bar"><i style="width:${Math.round(100 * (pos - 1) / Math.max(1, total))}%"></i></div>
+        <div class="v-body">
+
+          ${rare ? `<div class="v-flags"><span class="v-rare">rare here</span></div>${priorLine}` : ""}
+
+          <div class="v-name">
+            ${verifyPhotoHtml(card)}
+            <span class="taxon">${verifyNameHtml(card.taxon)}</span>
+            <span class="tier ${tierClass(card)}" title="${esc(tierWord(card))}"><i></i><i></i><i></i></span>
+          </div>
+          ${verifyCreditHtml(card)}
+
+          <!-- The clip's OWN spectrogram, computed here from the WAV: the station streams
+               live columns and does not render stored clips. Same palette, same log axis,
+               same fixed dB window as the live view — see analyseClip. -->
+          <div class="v-spec" id="vSpec">
+            <canvas id="vSpecCanvas" role="img"
+                    aria-label="Spectrogram of this recording, 200 Hz to 12 kHz"></canvas>
+            <div class="spectro-axis" id="vSpecAxis" aria-hidden="true"></div>
+            <div class="v-playhead" id="vPlayhead"></div>
+            <div class="pending" id="vSpecPending">Reading the clip…</div>
+          </div>
+
+          <div class="v-transport">
+            <button type="button" class="v-play" id="vPlay" aria-label="Play clip">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+            <div>
+              <div class="v-time"><span id="vAt">0:00</span> / <span id="vDur">${
+                secs != null ? fmtMmSs(secs) : "—"}</span></div>
+              <div class="label">${card.clip ? "recording" : "no clip stored"}</div>
+            </div>
+          </div>
+
+          ${stake}
+
+          <div class="v-actions">
+            <button type="button" class="v-act is-confirm" data-verdict="yes">
+              Confirm<span class="key">Y</span></button>
+            <button type="button" class="v-act is-reject" data-verdict="no">
+              Reject<span class="key">N</span></button>
+          </div>
+          <button type="button" class="btn is-quiet v-skip" data-verdict="skip">
+            Skip — decide later <span class="key data">S</span></button>
+          <div class="v-error" id="vError" role="status"></div>
+        </div>
+      </div>
+    </div>`;
+
+  buildClipAxis($("vSpecAxis"));
+  mount.querySelectorAll("[data-verdict]").forEach(b =>
+    b.addEventListener("click", () => onVerdict(b.dataset.verdict)));
+  $("vPlay").addEventListener("click", togglePlay);
+  loadClip(card);
+}
+
+/* Common name first, always (project rule), binomial always italic (§3). Same contract
+   as taxonHtml, different type sizes — the card is not a feed row. */
+function verifyNameHtml(t) {
+  if (!t.common) return `<span class="common is-binomial">${esc(t.scientific)}</span>`;
+  return `<span class="common">${esc(t.common)}</span><span class="sci">${esc(t.scientific)}</span>`;
+}
+
+/* The CC licence on these photos REQUIRES attribution wherever the image is shown, so
+   the credit is part of the component. photo === null means "not cached right now",
+   which is not "no photo exists" (API.md §1) — designed placeholder, never a broken img. */
+function verifyPhotoHtml(card) {
+  const p = card.photo;
+  // The glyph sits UNDER the image, so a URL the API handed us that 404s anyway reveals
+  // the designed placeholder instead of a broken tile — same trick as thumbHtml.
+  const img = (p && p.url)
+    ? `<img src="${esc(p.url)}" alt="Reference photograph of ${esc(card.taxon.common || card.taxon.scientific)}"
+            loading="lazy" onerror="this.remove()">`
+    : "";
+  return `<span class="v-photo">${img || GLYPH_BIRD}</span>`;
+}
+
+/* Separate from the image because the licence obligation is on the PAGE, not on the
+   element: the credit must show even when the <img> fails to load and only the
+   placeholder glyph is visible. photo === null means "not cached right now", which is
+   not "no photo exists" (API.md §1) — so that case says exactly that. */
+function verifyCreditHtml(card) {
+  const p = card.photo;
+  if (!p || !p.url) return `<div class="v-credit">No reference photo cached for this species.</div>`;
+  const src = p.source
+    ? ` <a href="${esc(p.source)}" target="_blank" rel="noopener noreferrer">source</a>`
+    : "";
+  return `<div class="v-credit">${esc(p.attribution || "unknown")}${
+    p.license ? " · " + esc(p.license) : ""}${src}</div>`;
+}
+
+function renderVerifyDone(mount) {
+  const t = verify.tally;
+  const done = t.yes + t.no + t.skip;
+  // verify.count is already decremented per decided species (onVerdict), so this is
+  // simply what is left — not a subtraction that would double-count.
+  const left = Math.max(0, verify.count);
+  const lifers = t.lifers.length
+    ? `<div>
+         <div class="label" style="margin-bottom:var(--space-8)">New to the life list</div>
+         <ul class="v-lifers" style="margin:0;padding:0">${t.lifers.map(l =>
+           `<li>${esc(l.common || l.scientific)} <i>${esc(l.scientific)}</i></li>`).join("")}</ul>
+       </div>`
+    : "";
+  mount.innerHTML = `
+    <div class="card v-done">
+      <div>
+        <div class="label">Done for now</div>
+        <div class="v-bignum" style="margin-top:var(--space-8)">${done}</div>
+        <div class="label" style="margin-top:var(--space-8)">species decided this session</div>
+      </div>
+      <div class="v-tally">
+        <div><span class="n">${t.yes}</span><div class="label">confirmed</div></div>
+        <div><span class="n">${t.no}</span><div class="label">rejected</div></div>
+        <div><span class="n">${t.skip}</span><div class="label">skipped</div></div>
+      </div>
+      ${lifers}
+      <div class="note">${left > 0
+        ? `<span class="data">${left}</span> still waiting. It will keep. Skipped species come round again.`
+        : "The queue is clear."}</div>
+      <div class="row">
+        ${left > 0 ? `<button type="button" class="btn" id="vAgain">Verify more</button>` : ""}
+        <button type="button" class="btn is-quiet" id="vToList">See the life list</button>
+      </div>
+    </div>`;
+  if ($("vAgain")) $("vAgain").addEventListener("click", async () => {
+    // Refetch first: the species just decided are gone from the server's queue, and
+    // starting a new session off the stale copy would re-ask about them.
+    $("vAgain").disabled = true;
+    await loadVerifyQueue(true);
+    verify.i = 0;
+    verify.tally = { yes: 0, no: 0, skip: 0, lifers: [] };
+    verify.phase = verify.queue.length ? "running" : "empty";
+    renderVerify();
+  });
+  $("vToList").addEventListener("click", () => selectTab("list"));
+}
+
+/* ---------------------------------------------------------------- the clip
+
+   THE STATION DOES NOT RENDER STORED CLIPS. /api/spectrogram streams live columns off
+   the capture thread and nothing else; a clip is just a WAV. So the card's spectrogram
+   is computed here, and it has to LOOK like the live view or the two stop reading as
+   the same instrument: same 256-entry LUT built from the --spec-* tokens, same 2048-point
+   Hann FFT, same 256 log-spaced bins over 200 Hz–12 kHz, same fixed 35 dB window above a
+   per-bin noise floor. See Spectrogram.kt — every constant below is copied from it.
+
+   The one honest difference: the station subtracts a ROLLING 30 s 20th percentile per
+   bin. A 3 s clip has no 30 s of history, so the percentile is taken over the whole clip
+   instead. Same estimator, whole-clip window — and emphatically NOT per-frame
+   normalisation, which is the bug that made the old live view a solid wash of traffic
+   rumble: a quiet frame gets its own noise floor stretched to full brightness. */
+const CLIP_FFT = 2048;            // Spectrogram.FFT_SIZE
+const CLIP_CPS = 30;              // Spectrogram.COLUMNS_PER_SECOND
+const CLIP_BINS = 256;            // Spectrogram.BINS
+const CLIP_DB_WINDOW = 35;        // Spectrogram.DB_WINDOW — FIXED, not per frame
+const CLIP_NOISE_PCT = 0.20;      // Spectrogram.NOISE_PERCENTILE
+const CLIP_DB_FLOOR = -140;       // Spectrogram.DB_FLOOR
+const CLIP_DB_CEIL = 10;          // Spectrogram.DB_CEIL
+
+/* Tables built once. Same hand-written radix-2 Cooley–Tukey as the station: 2048 points
+   is forty lines and the alternative is a dependency on a page that has none. */
+const fftTab = (() => {
+  const n = CLIP_FFT, bits = Math.round(Math.log2(n));
+  const rev = new Int32Array(n);
+  for (let i = 0; i < n; i++) { let v = i, r = 0; for (let b = 0; b < bits; b++) { r = (r << 1) | (v & 1); v >>= 1; } rev[i] = r; }
+  const cosT = new Float32Array(n / 2), sinT = new Float32Array(n / 2);
+  for (let i = 0; i < n / 2; i++) { cosT[i] = Math.cos(-2 * Math.PI * i / n); sinT[i] = Math.sin(-2 * Math.PI * i / n); }
+  const hann = new Float32Array(n);
+  for (let i = 0; i < n; i++) hann[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (n - 1));
+  return { rev, cosT, sinT, hann, re: new Float32Array(n), im: new Float32Array(n) };
+})();
+
+function fftInPlace() {
+  const { rev, cosT, sinT, re, im } = fftTab, n = CLIP_FFT;
+  for (let i = 0; i < n; i++) {
+    const j = rev[i];
+    if (j > i) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const half = len >> 1, step = n / len;
+    for (let i = 0; i < n; i += len) {
+      let k = 0;
+      for (let j = i; j < i + half; j++) {
+        const c = cosT[k], s = sinT[k];
+        const pr = re[j + half], pi = im[j + half];
+        const vr = pr * c - pi * s, vi = pr * s + pi * c;
+        const ur = re[j], ui = im[j];
+        re[j] = ur + vr; im[j] = ui + vi;
+        re[j + half] = ur - vr; im[j + half] = ui - vi;
+        k += step;
+      }
+    }
+  }
+}
+
+let audioCtx = null;
+function getAudioCtx() {
+  if (!audioCtx) {
+    const C = window.AudioContext || window.webkitAudioContext;
+    if (!C) return null;
+    audioCtx = new C();
+  }
+  return audioCtx;
+}
+
+/* WAV bytes -> array of Uint8Array(256) columns, 0..255, low frequency first — exactly
+   the wire format the live socket sends, so paintClip and drawColumn agree on layout. */
+async function analyseClip(bytes) {
+  const ctx = getAudioCtx();
+  if (!ctx) return null;
+  const buf = await ctx.decodeAudioData(bytes.slice(0));   // slice: decodeAudioData detaches
+  const pcm = buf.getChannelData(0);                       // the station records mono
+  const sr = buf.sampleRate;
+
+  // Bin edges derived from the DECODED rate, not assumed 48 kHz — decodeAudioData
+  // resamples to the context rate, and AudioCapture itself falls back through
+  // 44.1/32/22.05/16 kHz if the hardware refuses 48. Spectrogram.kt does the same.
+  const lo = new Int32Array(CLIP_BINS), hi = new Int32Array(CLIP_BINS);
+  const maxIdx = CLIP_FFT / 2 - 1;
+  for (let k = 0; k < CLIP_BINS; k++) {
+    const a = SPEC_F_MIN * Math.pow(SPEC_F_MAX / SPEC_F_MIN, k / CLIP_BINS);
+    const b = SPEC_F_MIN * Math.pow(SPEC_F_MAX / SPEC_F_MIN, (k + 1) / CLIP_BINS);
+    lo[k] = Math.min(maxIdx, Math.max(1, Math.trunc(a * CLIP_FFT / sr)));
+    hi[k] = Math.min(maxIdx, Math.max(lo[k], Math.trunc(b * CLIP_FFT / sr)));
+  }
+
+  const hop = Math.max(1, Math.round(sr / CLIP_CPS));
+  const nCols = Math.floor((pcm.length - CLIP_FFT) / hop) + 1;
+  if (nCols < 1) return { cols: [], seconds: buf.duration };
+
+  const scale = 2 / CLIP_FFT;                 // full-scale sine -> magnitude 1.0 -> 0 dB
+  const scale2 = scale * scale;
+  const db = new Float32Array(nCols * CLIP_BINS);
+  const { re, im, hann } = fftTab;
+
+  for (let c = 0; c < nCols; c++) {
+    const off = c * hop;
+    for (let i = 0; i < CLIP_FFT; i++) { re[i] = pcm[off + i] * hann[i]; im[i] = 0; }
+    fftInPlace();
+    for (let k = 0; k < CLIP_BINS; k++) {
+      // MAX across the range, never the mean: a bird call is a narrow peak and averaging
+      // it against the silence beside it is a low-pass filter applied to the signal.
+      let peak = 0;
+      for (let j = lo[k]; j <= hi[k]; j++) {
+        const m = re[j] * re[j] + im[j] * im[j];
+        if (m > peak) peak = m;
+      }
+      // 20*log10(|X|) == 10*log10(|X|^2): the sqrt never happens, same number.
+      let v = 10 * Math.log10(peak * scale2 + 1e-14);
+      if (v < CLIP_DB_FLOOR) v = CLIP_DB_FLOOR;
+      if (v > CLIP_DB_CEIL - 1) v = CLIP_DB_CEIL - 1;
+      db[c * CLIP_BINS + k] = v;
+    }
+  }
+
+  // Per-bin noise floor: the 20th percentile over the clip. A steady sound — traffic,
+  // wind, the fridge two floors down — IS its own 20th percentile and subtracts to zero;
+  // only what is louder than the rest of the clip survives. Quantised to the same 1 dB
+  // grid the station's histogram estimator uses, so the two agree bin for bin.
+  const floor = new Float32Array(CLIP_BINS);
+  const scratch = new Float32Array(nCols);
+  const idx = Math.min(nCols - 1, Math.max(0, Math.ceil(nCols * CLIP_NOISE_PCT) - 1));
+  for (let k = 0; k < CLIP_BINS; k++) {
+    for (let c = 0; c < nCols; c++) scratch[c] = db[c * CLIP_BINS + k];
+    // TypedArray sort is numeric by default — no comparator needed, and no string
+    // coercion of the kind Array.prototype.sort would silently apply.
+    const sorted = scratch.slice().sort();
+    floor[k] = Math.floor(sorted[idx]) + 0.5;
+  }
+
+  const cols = [];
+  for (let c = 0; c < nCols; c++) {
+    const out = new Uint8Array(CLIP_BINS);
+    for (let k = 0; k < CLIP_BINS; k++) {
+      const above = (db[c * CLIP_BINS + k] - floor[k]) / CLIP_DB_WINDOW;
+      out[k] = above <= 0 ? 0 : above >= 1 ? 255 : (above * 255) | 0;
+    }
+    cols.push(out);
+  }
+  return { cols, seconds: buf.duration };
+}
+
+/* Paint columns into any canvas at native resolution and let CSS scale it, exactly as
+   the live strip does. Smoothing stays on: the horizontal stretch reads as a continuous
+   waterfall where pixelated turns every column into a visible stripe. */
+function paintClip(canvas, cols) {
+  if (!canvas || !cols || !cols.length) return;
+  if (!spec.lut) spec.lut = buildLut();
+  const lut = spec.lut, w = cols.length;
+  canvas.width = w; canvas.height = CLIP_BINS;
+  const ctx = canvas.getContext("2d", { alpha: false });
+  const img = ctx.createImageData(w, CLIP_BINS);
+  const d = img.data;
+  for (let x = 0; x < w; x++) {
+    const col = cols[x];
+    for (let y = 0; y < CLIP_BINS; y++) {
+      // Row 0 is the TOP and must be the HIGHEST frequency; columns run low->high, so
+      // the bin index runs backwards against y. Same inversion as drawColumn().
+      const v = col[CLIP_BINS - 1 - y] * 3;
+      const o = (y * w + x) * 4;
+      d[o] = lut[v]; d[o + 1] = lut[v + 1]; d[o + 2] = lut[v + 2]; d[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+/* Same four marks as the live view — 1k / 2k / 4k / 8k only (§6) — via the same
+   log placement, so a call sits at the same height on both strips. */
+function buildClipAxis(host) {
+  if (!host) return;
+  host.innerHTML = [1000, 2000, 4000, 8000].map(hz =>
+    `<span style="bottom:${(binFractionForHz(hz) * 100).toFixed(2)}%">${hz / 1000}k</span>`).join("");
+}
+
+/* ONE fetch of the WAV, used for both the analysis and the <audio> element. Two fetches
+   would double the read off a phone that is spending ~190 ms of every 1.5 s hop inside
+   BirdNET, for a file it already has to send once. */
+async function loadClip(card) {
+  stopClip();
+  verify.cols = null;
+  const pending = $("vSpecPending");
+  if (!card.clip || !card.clip.url) {
+    if (pending) pending.textContent = "No clip stored for this detection — the storage cap pruned it.";
+    return;
+  }
+  const myId = card.id;
+  try {
+    const r = await fetch(card.clip.url, { cache: "no-store" });
+    if (!r.ok) throw new Error("clip " + r.status);
+    const bytes = await r.arrayBuffer();
+    if (verify.queue[verify.i] && verify.queue[verify.i].id !== myId) return;   // card moved on
+
+    verify.clipUrl = URL.createObjectURL(new Blob([bytes], { type: card.clip.mime || "audio/wav" }));
+    const a = new Audio(verify.clipUrl);
+    a.preload = "auto";
+    verify.audio = a;
+    a.addEventListener("ended", () => { setPlayIcon(false); stopPlayhead(); });
+    a.addEventListener("loadedmetadata", () => {
+      if (isFinite(a.duration) && $("vDur")) $("vDur").textContent = fmtMmSs(a.duration);
+    });
+    // Autoplay: the Start button was a user gesture, so the context is unlocked and this
+    // is what makes the chore fast — you hear the bird the moment the card appears.
+    // A blocked promise is normal on a cold load and must not reach the console.
+    a.play().then(() => { setPlayIcon(true); startPlayhead(); }).catch(() => {});
+
+    const res = await analyseClip(bytes);
+    if (verify.queue[verify.i] && verify.queue[verify.i].id !== myId) return;
+    if (!res || !res.cols.length) throw new Error("no columns");
+    verify.cols = res.cols;
+    paintClip($("vSpecCanvas"), res.cols);
+    if (pending) pending.remove();
+  } catch (e) {
+    // Degrade to a stated absence. A broken canvas with no explanation is worse than
+    // no canvas, and the verdict buttons still work without the picture.
+    if (pending && $("vSpecCanvas")) pending.textContent = "Could not read this clip's audio.";
+  }
+}
+
+function stopClip() {
+  stopPlayhead();
+  if (verify.audio) { verify.audio.pause(); verify.audio.src = ""; verify.audio = null; }
+  if (verify.clipUrl) { URL.revokeObjectURL(verify.clipUrl); verify.clipUrl = null; }
+}
+
+function togglePlay() {
+  const a = verify.audio;
+  if (!a) return;
+  if (a.paused) {
+    if (a.ended || a.currentTime >= (a.duration || 0)) a.currentTime = 0;
+    a.play().then(() => { setPlayIcon(true); startPlayhead(); }).catch(() => {});
+  } else {
+    a.pause(); setPlayIcon(false); stopPlayhead();
+  }
+}
+const ICON_PLAY = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>`;
+const ICON_PAUSE = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>`;
+function setPlayIcon(playing) {
+  const b = $("vPlay");
+  if (!b) return;
+  b.innerHTML = playing ? ICON_PAUSE : ICON_PLAY;
+  b.setAttribute("aria-label", playing ? "Pause clip" : "Play clip");
+}
+
+/* The playhead is driven by rAF rather than timeupdate: timeupdate fires about 4x/s,
+   which on a 3 s clip is a line that jumps in visible 25 %-of-a-second steps. */
+function startPlayhead() {
+  stopPlayhead();
+  const head = $("vPlayhead"), at = $("vAt");
+  if (!head) return;
+  head.style.display = "block";
+  const step = () => {
+    const a = verify.audio;
+    if (!a || a.paused) return;
+    const dur = a.duration || 0;
+    if (dur > 0) head.style.left = (100 * a.currentTime / dur).toFixed(2) + "%";
+    if (at) at.textContent = fmtMmSs(a.currentTime);
+    verify.raf = requestAnimationFrame(step);
+  };
+  verify.raf = requestAnimationFrame(step);
+}
+function stopPlayhead() {
+  if (verify.raf) cancelAnimationFrame(verify.raf);
+  verify.raf = 0;
+  const head = $("vPlayhead");
+  if (head) head.style.display = "none";
+}
+function fmtMmSs(s) {
+  if (!isFinite(s)) return "—";
+  const t = Math.max(0, Math.round(s));
+  return Math.floor(t / 60) + ":" + pad2(t % 60);
+}
+
+/* ---------------------------------------------------------------- verdicts */
+
+async function onVerdict(verdict) {
+  if (verify.busy || verify.phase !== "running") return;
+  const card = verify.queue[verify.i];
+  if (!card) return;
+
+  if (verdict === "skip") {
+    // No POST. A skip records nothing, so the species simply comes round next time —
+    // but it still costs one of the session's cards, because the cap is a promise about
+    // how many times you will be asked, not about how many you resolve.
+    verify.tally.skip++;
+    advanceVerify();
+    return;
+  }
+
+  verify.busy = true;
+  const err = $("vError");
+  document.querySelectorAll("[data-verdict]").forEach(b => b.disabled = true);
+  if (err) err.textContent = "";
+  try {
+    const r = await fetch("/api/verify/" + encodeURIComponent(card.id), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ verdict }),
+    });
+    if (!r.ok) throw new Error("verify -> " + r.status);
+    const out = await r.json();
+    if (typeof out.life_list_size === "number") verify.lifeSize = out.life_list_size;
+    verify.tally[verdict === "yes" ? "yes" : "no"]++;
+    // The card is decided on the server now, so drop it from the local copy of the
+    // queue rather than trusting a later refetch to do it.
+    verify.count = Math.max(0, verify.count - 1);
+    refreshLifeAfterVerdict();
+
+    if (verdict === "yes" && out.is_lifer) {
+      verify.tally.lifers.push({ common: out.common, scientific: out.scientific });
+      showLifer(card, out);        // advance happens when it is dismissed
+      verify.busy = false;
+      return;
+    }
+    advanceVerify();
+  } catch (e) {
+    // The verdict did NOT land. Leave the card up: silently advancing would lose a
+    // decision the user believes they made.
+    if (err) err.textContent = "Could not save that — the station did not answer. Try again.";
+    document.querySelectorAll("[data-verdict]").forEach(b => b.disabled = false);
+  }
+  verify.busy = false;
+}
+
+function advanceVerify() {
+  verify.i++;
+  if (verify.i >= sessionTotal() || verify.i >= verify.queue.length) {
+    verify.phase = "done";
+    renderVerify();
+    // Update the badge from the server's own count now the session is over. Guarded
+    // by phase !== "running", so this cannot disturb a card.
+    refreshVerifyQueue(true).catch(() => {});
+    return;
+  }
+  renderVerify();
+}
+
+/* §11: the List tab must not keep showing a life list that a verdict has just changed.
+   Invalidating is enough for the tab itself (loadList runs on next open); the life-list
+   fetch is additionally needed for the "new lifers this week" tile on Live. */
+function refreshLifeAfterVerdict() {
+  state.loaded.list = false;
+  apiMaybe("/api/life-list").then(d => {
+    if (!d) return;
+    state.lifeList = d;
+    renderTiles();
+    if ($("panel-list").classList.contains("is-active")) loadList().catch(() => {});
+  });
+}
+
+/* ---------------------------------------------------------------- lifer card §6 */
+
+function showLifer(card, out) {
+  const st = card.station || (state.health && state.health.station) || null;
+  const ms = card.detected_at_ms;
+  const common = out.common || card.taxon.common || "";
+  const sci = out.scientific || card.taxon.scientific;
+
+  $("liferEyebrow").textContent = "life list #" + verify.lifeSize;
+  const nameEl = $("liferName");
+  // No common name means the binomial is promoted into the 56px slot — and it is still
+  // a binomial, so it keeps its italics. "Always italic" has no exceptions (§3).
+  nameEl.textContent = common || sci;
+  nameEl.classList.toggle("is-binomial", !common);
+  $("liferSci").textContent = common ? sci : "";
+  $("liferSci").style.display = common ? "" : "none";
+
+  // Specimen label, §6: station, coordinates, date, time, score — all --font-data.
+  // The detector rides along on the score line because a confidence means nothing
+  // without knowing which model produced it (API.md §1: scores are not comparable
+  // across detectors), and a bare "83%" on a museum tag would be a claim, not a record.
+  $("liferMeta").innerHTML = [
+    ["Station", st ? esc(st.name || st.id) : "—"],
+    ["Coords", st ? `${st.lat.toFixed(4)}, ${st.lon.toFixed(4)}` : "—"],
+    ["Date", localDate(ms)],
+    ["Time", fmtClockSec(ms)],
+    ["Score", `${fmtScore(card.confidence)} · ${esc(card.detector.name)} ${esc(card.detector.version)}`],
+  ].map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("");
+
+  const box = $("liferCard");
+  box.classList.add("is-open");
+  box.setAttribute("aria-hidden", "false");
+  // Artwork LAST: the canvas has to be laid out before it can be sized, and the
+  // spectrogram of the exact detection that earned it is the whole point of the card.
+  requestAnimationFrame(() => paintClip($("liferArt"), verify.cols || []));
+  $("liferGo").focus();
+}
+
+function dismissLifer() {
+  const box = $("liferCard");
+  if (!box.classList.contains("is-open")) return;
+  box.classList.remove("is-open");
+  box.setAttribute("aria-hidden", "true");
+  advanceVerify();
+}
+$("liferGo").addEventListener("click", dismissLifer);
+
+/* ---------------------------------------------------------------- keyboard §6
+   y / n / s on desktop. Deliberately NOT bound while a lifer card is up (that moment
+   is not a decision point), while a verdict is in flight, or while the user is typing
+   into the species search on another tab. */
+document.addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if ($("liferCard").classList.contains("is-open")) {
+    if (e.key === "Escape" || e.key === "Enter" || e.key === " ") { e.preventDefault(); dismissLifer(); }
+    return;
+  }
+  if (verify.phase !== "running" || verify.busy) return;
+  if (!$("panel-verify").classList.contains("is-active")) return;
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+
+  const k = e.key.toLowerCase();
+  if (k === "y") { e.preventDefault(); onVerdict("yes"); }
+  else if (k === "n") { e.preventDefault(); onVerdict("no"); }
+  else if (k === "s") { e.preventDefault(); onVerdict("skip"); }
+  else if (e.key === " " && (!t || t.tagName !== "BUTTON")) { e.preventDefault(); togglePlay(); }
+});
+
+/* THE CANDIDATE ROW READ, kept only as the List tab's fallback for a station too old
+   to serve /api/life-list. Measured against the balcony station:
 
        GET /api/detections?state=candidate&limit=500  ->  402 kB, 9.4 s
 
-   on a phone that is simultaneously spending ~190 ms of every 1.5 s hop inside BirdNET.
-   The first version of this file called it from the SSE detection handler, i.e. once
-   per detection: on a busy night that is a continuous 400 kB drip out of the station,
-   competing with inference for the one CPU it has.
-
-   So: fetch it rarely, cache it, and let BOTH consumers (the Verify badge and the List
-   tab's "heard, not yet confirmed" section) share the single result. An unread-style
-   count that is up to five minutes stale is fine; a station that is being hammered by
-   its own dashboard is not. */
+   on a phone already spending ~190 ms of every 1.5 s hop inside BirdNET. It is no longer
+   on any path the Verify tab takes, and loadList only reaches it when the life-list
+   endpoint is missing. Cached regardless, because the old version of this file called it
+   once per detection from the SSE handler — a continuous 400 kB drip out of the station,
+   competing with inference for the one CPU it has. */
 const CANDIDATE_LIMIT = 500;                   // API.md caps `limit` here
 const CANDIDATE_TTL_MS = 5 * 60 * 1000;
 const candidates = { at: 0, rows: null, capped: false, inflight: null };
@@ -1265,22 +2291,6 @@ async function loadCandidates(force) {
     return candidates;
   })();
   return candidates.inflight;
-}
-
-async function refreshVerifyQueue(force) {
-  const c = await loadCandidates(force);
-  if (!c.rows) return;
-  const n = c.rows.length;
-  // A full page means "at least this many", not "exactly this many". Printing a bare
-  // 500 would claim a precision the query cannot support, and this is the number the
-  // user decides whether to start on.
-  const shown = c.capped ? n + "+" : String(n);
-  const badge = $("verifyBadge");
-  badge.textContent = shown;
-  badge.hidden = n === 0;
-  $("verifyStake").textContent = n === 0
-    ? "Nothing waiting. Every stored detection has cleared or failed the threshold on its own."
-    : `${shown} detection${n === 1 ? "" : "s"} waiting to be confirmed or rejected.`;
 }
 
 /* =============================================================================
@@ -1522,7 +2532,9 @@ function connectSSE() {
 }
 
 document.addEventListener("click", e => {
-  const img = e.target.closest(".thumb img");
+  // .v-photo img too: the verification card's reference photo is the one image on the
+  // page a person actually needs to look at closely before deciding.
+  const img = e.target.closest(".thumb img, .v-photo img");
   if (!img) return;
   $("lightboxImg").src = img.src;
   $("lightbox").classList.add("is-open");
@@ -1540,6 +2552,8 @@ document.addEventListener("keydown", e => {
 });
 
 (async function boot() {
+  renderVerify();     // paints the "reading the queue" state before the fetch lands, so
+                      // deep-linking to #verify never shows an empty panel
   selectTab((location.hash || "#live").slice(1));
   initSpectrogram();
   try { renderHealth(await api("/api/health")); } catch (e) { /* the poll below retries */ }
