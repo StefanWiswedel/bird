@@ -1,0 +1,283 @@
+/* =============================================================================
+   Biomon — design tokens, font loading, grain, base layer.
+
+   GENERATED FROM: .claude/skills/biomon-ui/SKILL.md
+   That skill file is the SOURCE OF TRUTH. Every colour, font, size, spacing
+   step, radius and motion value below is copied from it verbatim. If a value
+   here needs to change, change SKILL.md first and regenerate this file.
+
+   COMPONENTS MUST NEVER HARDCODE A HEX VALUE. The only hex literals allowed in
+   the whole stylesheet layer are the :root token definitions below. Everything
+   else — every rule in this file, every rule in index.html — references
+   var(--token).
+
+   This file deliberately contains NO component styles (no detection row, no
+   lifer card, no stat tiles, no spectrogram chrome). It is the foundation only.
+   ========================================================================== */
+
+/* -----------------------------------------------------------------------------
+   Fonts — SKILL.md §3. Three families, each with one job. display=swap.
+   Fraunces is loaded variable with ital + opsz + wght + SOFT + WONK, because
+   headings require SOFT 0 / WONK 1 and binomials require true italics.
+   These three families, plus the Georgia / serif / sans-serif / monospace
+   fallbacks declared below, are the ONLY families permitted anywhere in the
+   Biomon UI. SKILL.md §3 names six specific faces that are forbidden outright —
+   read it before adding any font-family declaration.
+-------------------------------------------------------------------------- */
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT,WONK@0,9..144,100..900,0..100,0..1;1,9..144,100..900,0..100,0..1&family=Instrument+Sans:ital,wght@0,400..700;1,400..700&family=Martian+Mono:wght@100..800&display=swap");
+
+:root {
+  /* ==========================================================================
+     COLOUR — SKILL.md §2
+     ====================================================================== */
+
+  /* Ground — warm near-black, never pure black, never blue-grey slate */
+  --bg:            #100D0B;
+  --bg-raised:     #1A1512;
+  --bg-sunken:     #0A0807;
+
+  /* Lines and edges — warm, low contrast, barely there */
+  --line:          #2B2320;
+  --line-strong:   #3D332D;
+
+  /* Text */
+  --ink:           #F4EDE2;   /* primary, warm cream */
+  --ink-soft:      #A99B8B;   /* secondary */
+  --ink-faint:     #6B5F55;   /* tertiary, timestamps, units */
+
+  /* Living — status, confirmed, "listening". Sap green. */
+  --alive:         #9CC471;
+  --alive-dim:     #4E6339;
+  --alive-wash:    rgba(156, 196, 113, 0.12);
+
+  /* Activity — detections, energy, spectrogram. Ember amber. */
+  --ember:         #E8A33D;
+  --ember-dim:     #6B4A1C;
+  --ember-wash:    rgba(232, 163, 61, 0.12);
+
+  /* Rare signal — RESERVED. Lifers, rarity flags, and the confirm action.
+     Nothing else. Not buttons, links, badges, errors, axes or headings. */
+  --signal:        #FF6B4A;
+  --signal-wash:   rgba(255, 107, 74, 0.14);
+
+  /* Rejected / negative — never harsh red */
+  --void:          #7A5C57;
+
+  /* ==========================================================================
+     SPECTROGRAM PALETTE RAMP — SKILL.md §6
+     Five stops, exposed individually so JS can read them with
+     getComputedStyle(document.documentElement).getPropertyValue('--spec-00')
+     and interpolate a 256-entry lookup table.
+     A single warm hue family. Never inferno, viridis, jet or any rainbow map.
+     ====================================================================== */
+  --spec-00:  #100D0B;   /* 0.00 noise floor — must vanish into the page (== --bg) */
+  --spec-25:  #3B2416;   /* 0.25 */
+  --spec-50:  #8A4A1E;   /* 0.50 */
+  --spec-75:  #E8A33D;   /* 0.75 (== --ember) */
+  --spec-100: #FFF3D6;   /* 1.00 */
+
+  /* Stop positions, so the LUT builder does not have to hardcode them either. */
+  --spec-00-pos:  0.00;
+  --spec-25-pos:  0.25;
+  --spec-50-pos:  0.50;
+  --spec-75-pos:  0.75;
+  --spec-100-pos: 1.00;
+
+  /* ==========================================================================
+     TYPOGRAPHY — SKILL.md §3
+     ====================================================================== */
+  --font-display: 'Fraunces', Georgia, serif;      /* species names, headings */
+  --font-ui:      'Instrument Sans', sans-serif;   /* body, labels, buttons */
+  --font-data:    'Martian Mono', monospace;       /* numbers, times, counts */
+
+  /* Fraunces variable axes for headings and species names: SOFT 0, WONK 1.
+     The wonk is what gives it the engraved, slightly organic character. */
+  --axes-display: 'SOFT' 0, 'WONK' 1;
+
+  /* Type scale — 11 / 13 / 15 / 18 / 22 / 28 / 40 / 56. Nothing between.
+     56 is reserved for the lifer card and the species-count headline. */
+  --text-11: 11px;
+  --text-13: 13px;
+  --text-15: 15px;
+  --text-18: 18px;
+  --text-22: 22px;
+  --text-28: 28px;
+  --text-40: 40px;
+  --text-56: 56px;
+
+  /* Body metrics and the micro-copy tracking value */
+  --leading-body:   1.55;
+  --tracking-label: 0.08em;
+  --weight-display: 600;   /* common names */
+
+  /* ==========================================================================
+     SPACE, SHAPE, DEPTH — SKILL.md §4
+     ====================================================================== */
+
+  /* Spacing scale — 4 / 8 / 12 / 16 / 24 / 32 / 48 / 64. Nothing between. */
+  --space-4:  4px;
+  --space-8:  8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-48: 48px;
+  --space-64: 64px;
+
+  /* Radius. The spectrogram and full-bleed media are square — radius 0. */
+  --r-sm: 6px;
+  --r-md: 12px;
+  --r-lg: 18px;
+
+  /* Minimum touch target — one-handed, outdoors, in the dark. */
+  --touch-min: 44px;
+
+  /* Grain overlay — see .grain below. Signature detail; keep it. */
+  --grain-opacity: 0.025;
+  --grain-tile:    160px;
+  --grain-image:   url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'%3E%3Cfilter id='g' x='0' y='0' width='100%25' height='100%25'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23g)'/%3E%3C/svg%3E");
+
+  /* Stacking: grain sits above the page background, below all content. */
+  --z-grain:   1;
+  --z-content: 2;
+
+  /* ==========================================================================
+     MOTION — SKILL.md §5. Restrained by default; the budget is spent on the
+     spectrogram scroll and the lifer reveal.
+     ====================================================================== */
+  --ease-entrance: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --dur-row-enter:   180ms;   /* new detection row: fade + 6px slide from top */
+  --shift-row-enter: 6px;
+
+  --dur-lifer-art:   400ms;   /* spectrogram artwork fades in */
+  --dur-lifer-step:  300ms;   /* each subsequent stagger step */
+  --delay-lifer-name:     120ms;
+  --delay-lifer-binomial: 200ms;
+  --delay-lifer-meta:     280ms;
+  --shift-lifer-name:     12px;
+}
+
+/* =============================================================================
+   BASE LAYER
+   Minimal on purpose. index.html owns components.
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--text-15);
+  line-height: var(--leading-body);
+}
+
+/* Headings and species names use the display face with SOFT 0 / WONK 1.
+   font-optical-sizing:auto drives the opsz axis from the rendered size, which
+   is what "opsz set high for large sizes" asks for.
+   Wrapped in :where() so specificity is 0 and any component rule overrides it. */
+:where(h1, h2, h3, h4, h5, h6) {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: var(--weight-display);
+  font-variation-settings: var(--axes-display);
+  font-optical-sizing: auto;
+}
+
+/* Anything using --font-data must be tabular so columns of numbers align and
+   don't jitter as they update. Use this class rather than setting the family
+   by hand; if you do set the family by hand, set the variant too. */
+.data {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+/* Uppercase micro-copy — section eyebrows like LATEST or LIFE LIST.
+   Recurs everywhere, so it lives in the base layer rather than per-component. */
+.label {
+  font-family: var(--font-ui);
+  font-size: var(--text-11);
+  line-height: 1.2;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* -----------------------------------------------------------------------------
+   GRAIN — SKILL.md §4, signature detail.
+   Dark flat fills look plasticky on OLED; the grain reads as paper.
+   Fixed, covers the viewport, above the background, below all content,
+   never intercepts clicks.
+
+   Usage: <div class="grain" aria-hidden="true"></div> as a child of <body>.
+-------------------------------------------------------------------------- */
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-grain);
+  pointer-events: none;
+  opacity: var(--grain-opacity);
+  background-image: var(--grain-image);
+  background-repeat: repeat;
+  background-size: var(--grain-tile) var(--grain-tile);
+}
+
+/* Lift body-level content above the grain. Zero specificity (:where) so any
+   component rule wins trivially — including one that needs position:fixed. */
+:where(body > *:not(.grain)) {
+  position: relative;
+  z-index: var(--z-content);
+}
+
+/* -----------------------------------------------------------------------------
+   REDUCED MOTION — SKILL.md §5.
+   "Keep the spectrogram (it's information, not decoration), drop the lifer
+   stagger to a simple fade."
+
+   So: collapse the stagger delays and the entrance translations to zero, which
+   turns the lifer reveal and the row entrance into plain fades, and neutralise
+   incidental animation. The spectrogram is exempt — mark its element
+   data-motion="essential" and it is left alone.
+-------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    /* Stagger becomes simultaneous; translation becomes none. Durations are
+       deliberately KEPT, so the result is a fade rather than a jump-cut. */
+    --delay-lifer-name:     0ms;
+    --delay-lifer-binomial: 0ms;
+    --delay-lifer-meta:     0ms;
+    --shift-lifer-name:     0px;
+    --shift-row-enter:      0px;
+  }
+
+  html {
+    scroll-behavior: auto !important;
+  }
+
+  /* Keep fades, drop movement: transitions may only carry opacity, delays go
+     to zero, and nothing loops. Note this is NOT the usual blanket
+     "animation-duration: 0.01ms" boilerplate — that would erase the fades the
+     spec asks us to keep. Anything marked data-motion="essential" (the
+     spectrogram scroll, which is information rather than decoration) and its
+     descendants are exempt entirely. */
+  *:not([data-motion='essential']):not([data-motion='essential'] *),
+  *:not([data-motion='essential']):not([data-motion='essential'] *)::before,
+  *:not([data-motion='essential']):not([data-motion='essential'] *)::after {
+    transition-property: opacity !important;
+    transition-delay: 0ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
