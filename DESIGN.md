@@ -40,6 +40,10 @@ A personal-first (maybe-later-product) biodiversity monitoring platform. One pho
 - **Video** — insect board: fixed top-down camera over an A4 board, detect + crop + classify landings.
 - **Audio** — passive acoustic ID (birds now; bats / Orthoptera later).
 
+The audio path now has two deployments: the desktop pipeline analysing recordings after
+the fact (§3–§9), and an **always-on Android bird station** (§11) doing the same job live,
+continuously, on a wall-mounted phone.
+
 ## 2. Core rules — READ THIS FIRST
 
 ### 2a. Unify at the ends, keep the middles separate.
@@ -956,7 +960,7 @@ its own measurement.
     only its cheap proxy.
   **What would settle it**: three nights of data, then compare co-occurrence rates in confirmed-bird
   windows against confirmed-noise windows, with the dawn hour separated out. Not before.
-- **REFUTED 2026-08-03, on 19 h of ground-truth negative audio.** The station ran overnight in a
+- **REFUTED 2026-08-03, on 19 h of ground-truth negative audio (§11f).** The station ran overnight in a
   LOUNGE — the observer confirms no bird audio was reachable, so all **5,499 detections across 101
   species are known-false**, a labelled negative corpus. Scored on it, the ≥3-species rule removes
   **zero** false confirmations (81 before, 81 after) while suppressing 250 rows; ≥2 species removes
@@ -978,9 +982,55 @@ its own measurement.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
-- (2026-08-02, **the repeat rule was measuring the wrong thing**) **Station curation: ≥2 detections becomes ≥2 bouts >60 s apart.** 55 min of balcony audio, 135 rows, 35 species, 11 confirmed. Of 13 rows over threshold the ≥2-detections rule rejected **2**, and passed a **19-consecutive-window** *Porzana porzana* (Spotted Crake) run that is one ~30 s noise event — a species that calls April–June at night, scored at 0.918 in August in Amager. The mechanism is arithmetic, not bad luck: at a 3.0 s window / **1.5 s hop** consecutive windows share half their audio, and **30 of 47 inter-detection gaps were exactly 1.5 s**. The rule was counting how long a sound lasted. It now requires two bouts separated by **> 60 s**, which is a claim about the animal (it called, stopped, and called again) rather than about the analysis window. §3b's persistence hypothesis is downgraded accordingly — persistence is **necessary, not sufficient**. Second finding from the same hour, logged as a hypothesis in §8 and deliberately **not** built: 12 windows returned multiple species and one returned four (Goldcrest + Spotted Crake + Willow Tit + Coot in the same 3 s), which no balcony can produce.
-- (2026-08-02, **§2d again**) **The regional gate was removing the tell, not the error.** `regional` flags **455 of 6522** BirdNET classes because the DOF list is a *national checklist including every vagrant ever recorded* — so Dark-eyed Junco (12 rows), Sandhill Crane and White-throated Sparrow all read as "Danish species", while the gate's write-path `continue` silently deletes the obviously-absurd classes that would have told an observer the model was guessing. Membership is the wrong instrument; it answers "has this ever occurred in Denmark" when the question is "how likely is it here, this week". Being replaced by BirdNET's own location/week occurrence meta-model — a probability, not a set. Also note the gate contradicted the rule stated in `Model.kt` and `build_station_species.py` ("never drop a class, down-weight it"); the code and its own documentation had diverged.
-- (2026-08-02, **retention hazard found before it cost anything**) **`onUpgrade` has issued an unconditional `DELETE FROM detections` in two of four schema versions**, and `pruneToCapBytes` deletes clip FILES while keeping rows (nulling `clip_path`), with `pruned_total` hardcoded to 0 in `/api/health` so it is invisible. Neither is a bug today; both are fatal to a life list, where the audio behind a lifer is unrecoverable. Consequence for the life-list schema: pinning must cover **rows as well as clips**, migrations must exclude pinned rows, and pruning must skip them.
+- (2026-08-03) **§11 written: the bird station's full architecture documented.** The
+  station (`recorder/station`, built 2026-08-02 onward) had been accumulating design
+  decisions and measurements in this changelog and in §8 without a home describing the
+  system itself — capture, curation, the life list, the dashboard. §11 now covers all of
+  it; the entries below (2026-08-02/03) are the individual findings that fed it.
+- (2026-08-03) **Verification interface: a card-stack, one species at a time** (§11h).
+  Five states (setup/running/done/empty/unreachable); setup states the queue size before
+  committing and offers a session cap of 10/25/all counting cards *presented*, not
+  resolved. Rejecting a species removes it from the species list and day rollups but
+  leaves its detection rows visible, greyed, in the feed — the signal that a per-species
+  threshold override is due. The client-side spectrogram reuses every constant from
+  `Spectrogram.kt` so a card looks like the live view; the one documented divergence is
+  that a 3 s clip has no 30 s of history, so its percentile floor is taken over the whole
+  clip. Build stamp moved into the header as an identity marker, not a Settings metric.
+- (2026-08-03) **The life list, and a local-occurrence prior that replaces the regional
+  checklist gate** (§11d, §11h). `species_status` / `verifications` / `species_prior`
+  schema (v5). A species reaches `confirmed` only through a human verdict — no score
+  promotes one, and nothing is grandfathered. Pinning (`lifer_detection_id`/
+  `best_detection_id`) now covers rows as well as clip files, closing the retention hazard
+  below. BirdNET's own location/week meta-model replaces DOF-checklist set-membership for
+  the confirm-threshold penalty, run on-device for the station's coordinates across all 48
+  weeks; the penalty is log-scaled because priors span five orders of magnitude. Measured
+  on the 19 h known-negative corpus: flat threshold + bout rule left 81 false rows/6
+  species; + prior threshold, 50/4.
+- (2026-08-03) **Curation: bouts replace windows, and the clip floor splits from the row
+  floor** (§11f, §11g). `repeat_count` now counts detections separated by >60 s as
+  distinct bouts rather than raw rows — 102→81 false rows / 9→6 false species on the 19 h
+  negative corpus. Clip retention (0.50) is now a separate, higher bar than row retention
+  (0.10): one floor governing both had the station writing 5,022 clips in 19 h (≈667
+  GB/year against ≈908 MB/year of rows), so the 8 GB cap held four days of audio; split,
+  the same cap holds ~83 days with zero rows dropped. `daySummaries` was found skipping
+  the repeat check and reporting a different confirmed-species count than `/api/species`
+  from the same table in the same second — fixed to share the bout logic. The §8
+  co-occurrence hypothesis was scored on the same corpus and **refuted**: it removes zero
+  false confirmations, because multi-species windows are already low-confidence and only
+  overlap rows the threshold had already excluded.
+- (2026-08-03) **Dashboard restructured to five tabs around the life list, spectrogram
+  moved from polled images to a streamed WebSocket, and the design system made
+  enforceable** (§11j). Live / List / Verify / Days / Settings, because the life list is
+  the spine, not a bolt-on. The spectrogram now streams one 265-byte binary column per FFT
+  frame over `/api/spectrogram` (2048-pt Hann, 256 log bins 200 Hz–12 kHz, 30 cols/s target)
+  from a continuous capture tap, rather than rebuilding a spectrogram client-side from a
+  polled 3 s WAV — removes the latency, tearing, resolution ceiling and jitter that
+  approach had. Every design-system value (`.claude/skills/biomon-ui/SKILL.md`) is now a
+  CSS custom property in `tokens.css`, so a hardcoded colour is visibly wrong rather than
+  merely undisciplined.
+- (2026-08-02, **the repeat rule was measuring the wrong thing**, §11f) **Station curation: ≥2 detections becomes ≥2 bouts >60 s apart.** 55 min of balcony audio, 135 rows, 35 species, 11 confirmed. Of 13 rows over threshold the ≥2-detections rule rejected **2**, and passed a **19-consecutive-window** *Porzana porzana* (Spotted Crake) run that is one ~30 s noise event — a species that calls April–June at night, scored at 0.918 in August in Amager. The mechanism is arithmetic, not bad luck: at a 3.0 s window / **1.5 s hop** consecutive windows share half their audio, and **30 of 47 inter-detection gaps were exactly 1.5 s**. The rule was counting how long a sound lasted. It now requires two bouts separated by **> 60 s**, which is a claim about the animal (it called, stopped, and called again) rather than about the analysis window. §3b's persistence hypothesis is downgraded accordingly — persistence is **necessary, not sufficient**. Second finding from the same hour, logged as a hypothesis in §8 and deliberately **not** built: 12 windows returned multiple species and one returned four (Goldcrest + Spotted Crake + Willow Tit + Coot in the same 3 s), which no balcony can produce.
+- (2026-08-02, **§2d again**, §11d) **The regional gate was removing the tell, not the error.** `regional` flags **455 of 6522** BirdNET classes because the DOF list is a *national checklist including every vagrant ever recorded* — so Dark-eyed Junco (12 rows), Sandhill Crane and White-throated Sparrow all read as "Danish species", while the gate's write-path `continue` silently deletes the obviously-absurd classes that would have told an observer the model was guessing. Membership is the wrong instrument; it answers "has this ever occurred in Denmark" when the question is "how likely is it here, this week". Being replaced by BirdNET's own location/week occurrence meta-model — a probability, not a set. Also note the gate contradicted the rule stated in `Model.kt` and `build_station_species.py` ("never drop a class, down-weight it"); the code and its own documentation had diverged.
+- (2026-08-02, **retention hazard found before it cost anything**, §11g) **`onUpgrade` has issued an unconditional `DELETE FROM detections` in two of four schema versions**, and `pruneToCapBytes` deletes clip FILES while keeping rows (nulling `clip_path`), with `pruned_total` hardcoded to 0 in `/api/health` so it is invisible. Neither is a bug today; both are fatal to a life list, where the audio behind a lifer is unrecoverable. Consequence for the life-list schema: pinning must cover **rows as well as clips**, migrations must exclude pinned rows, and pruning must skip them.
 - (2026-07-30) **First interval-stills capture, and it reported 0 insects when at least three are plainly visible (§6d).** 1,026 images at 1.97 fps. Three constants that read as being about insects turned out to be about the camera: blob area limits (the board is **4.65×** the corpus area, so 8..2500 px meant "nothing bigger than a fifth of the corpus maximum"), the rolling-median window (`sample_every=30` is 240 s at 5.97 Hz and **730 s** at 1.97 Hz, longer than the whole capture), and the crop context floor. Each fix derives the constant from the capture and reproduces the corpus value exactly - `240726_1` re-ran to 2,410 blobs byte-for-byte. Also **the mount sagged 11.7 px**, which put **94.6 % of 20,232 blobs on the board's two support wires**; the corpus never showed this because at 1080p the wires were a pixel wide and `MORPH_OPEN` erased them - **the bug appeared because the sensor got better**. Window fix plus phase-correlation registration take 20,232 blobs to 3,610. The count stays 0 in all three variants: every real visit lasted **one frame**, so `n>=3` removes them, and the classifier calls all 14 candidates junk at 41-92 % - **`none_dirt` 87 % on a sharply focused fly**. Framing (1.9×-10× context) and pixel scale (1×-4.5× downsample) both swept and refuted; a control on the corpus's own 63 confirmed crops returns 54 insect, so the probe is sound and this is **domain mismatch**, measured at last rather than anticipated.
 - (2026-07-30, **measures a caveat that was open since §6b**) **The sub-0.8 s blind spot is not a minority case - in `300726_1` it is every case.** The fps knee test could not see visits under 0.8 s because the persistence filter had already deleted them. At 12 MP a single frame is unambiguous enough to adjudicate by eye, and every one of the 14 candidates is single-frame. One candidate persisted TWO frames and so **passed** the rate-derived duration test, failing only the sample count: `MIN_SAMPLES=3` is the half of the persistence rule that stayed in the camera’s terms, invisible at 5.97 Hz where it coincides with the derived value and an override at every lower rate (derived n is **1** at both 3.0 and 1.97 Hz). The open decision — the observer’s, per §2b — is whether it should follow the capture mode, with the price tag in §6d.
 - (2026-07-30, **rule earning its keep**) §2d again, twice in one session: "20,232 blobs" was a drifting mount reported as activity, and "0 insects" was two filters reported as an empty board. Both runs exited 0.
@@ -1356,6 +1406,467 @@ any code was written. **Approved 2026-07-28: native Kotlin, for the reason that 
 `AudioSource.UNPROCESSED`.** Built and field-tested since (§10d-bis).
 
 *(Renumbered from a second "10f" that collided with the on-device-classification section.)*
+
+## 11. Bird Station (Android, always-on)
+
+A second, separate APK (`:station`, `dk.biomon.station`) from the Field Recorder App in
+§10. §10's app is *carried and watched* — picked up, pointed at something, put away.
+This one is *bolted to a wall and must never stop*: capture → on-device BirdNET →
+curation → SQLite → serve, running continuously and answered from any device on the LAN.
+The two apps share no code (each forked file names its origin — `AudioCapture.kt` from
+`AudioEngine.kt`, `PhotoCache.kt` from `SpeciesImageFetcher.kt`) because their lifecycles
+are opposite and a shared library module would mean editing a working `:app` to serve a
+requirement it doesn't have.
+
+`recorder/station/API.md` is the data contract — **written before either side was built**,
+so the Android service and the dashboard (`assets/www/index.html`) build against the
+schema rather than against each other. It is versioned (`schema: 1`) and is the
+authoritative reference for every HTTP endpoint and JSON shape below; this section covers
+the architecture and the decisions behind it.
+
+### 11a. Device and the three-layer OxygenOS survival
+
+**Target device: OnePlus 5T, Android 10, API 29** (a 2017 Snapdragon 835). `minSdk = 29`
+is not arbitrary — background microphone access on Android 10 *requires* a foreground
+service declaring `foregroundServiceType="microphone"`, which only exists from API 29.
+
+An always-on station has one hard requirement — it does not die — and OxygenOS is known
+to defeat any single mitigation on its own. Three independent layers, per
+`StationService`'s class doc:
+
+1. **Foreground service** (`type="microphone"`) + a **partial wake lock** held for the
+   service's entire lifetime.
+2. **`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`**, prompted once from `MainActivity` — OxygenOS's
+   own battery manager can still kill an unwhitelisted foreground service even with (1) in
+   place. This is the one step that needs a human, and `MainActivity` keeps asking until
+   it's granted.
+3. **`Watchdog`**: a periodic `AlarmManager` check (`setExactAndAllowWhileIdle`, so Doze
+   cannot defer it for hours) running **outside** the service process. Every `onWindow`
+   call stamps a heartbeat; if it's older than 5 minutes when the watchdog fires (every 10
+   minutes), the service is assumed dead and explicitly restarted — not just re-armed and
+   hoped for. `BootReceiver` covers the case the whole process is gone: it restarts the
+   service and re-arms the watchdog on `BOOT_COMPLETED`, `MY_PACKAGE_REPLACED` and OEM
+   quick-boot, since a station that needs a human to reopen the app after every power
+   blip is not "always on".
+
+`MainActivity` itself is deliberately thin — "a glance, not a dashboard": it requests the
+two permissions the service can't request for itself, polls its own `/api/health` over
+loopback to confirm the service is alive, and shows the LAN URL (`http://<ip>:8848`) to
+open elsewhere. The real UI is the phone's own web server.
+
+### 11b. Audio capture and on-device BirdNET inference
+
+Forked from `AudioCapture` (§10) with the same discipline — `AudioSource.UNPROCESSED`
+requested first, `AGC`/`NS`/`AEC` explicitly disabled where the platform allows it — and
+the same graceful degradation: if the hardware refuses `UNPROCESSED` it falls back to
+`VOICE_RECOGNITION` (the Pixel 9a precedent, §10d-bis) and, if it refuses 48 kHz
+entirely, walks down `[48000, 44100, 32000, 22050, 16000]` and linearly resamples back up
+to 48 kHz before the model ever sees it — **BirdNET has no fallback for a wrong sample
+rate, it just quietly mis-scores everything**.
+
+- **Window 3.0 s, hop 1.5 s** — BirdNET's own training configuration (`birdnetlib`'s
+  `main.py`, read from source, not guessed). 50% overlap.
+- **5.0 s warm-up discard**, inference path only. `AudioRecord`'s first buffers after
+  `startRecording()` are not trustworthy, and on a device where `UNPROCESSED` is actually
+  honoured there is no AGC masking it — found directly when a freshly cleared station's
+  very first stored detection was a Great Spotted Woodpecker at 0.675, two seconds after
+  boot, in a closed lounge. The **spectrogram tap is deliberately not gated** by the same
+  discard: a display blank for five seconds after start looks exactly like the failure
+  it exists to catch, and its own noise floor needs that history anyway.
+- **Inference runs synchronously on the capture thread.** BirdNET's ~100–200 ms per
+  window is well inside the 1.5 s hop budget, so a second thread would add complexity for
+  no latency win. A **separate, continuous PCM tap** (`onPcm`) feeds the spectrogram from
+  the same thread — necessary because the inference windows overlap 50% and drawing them
+  directly would draw half of all audio twice and tear (§11e).
+- **The model runs as raw TFLite, not `birdnetlib`/Python.** `BirdNet.kt` calls
+  TensorFlow Lite's Java `Interpreter` directly against **`BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite`**
+  (~52 MB, 4 threads), with input/output shapes and the score conversion
+  **read from `birdnetlib`'s own source** rather than guessed: input `float32 [1, 144000]`
+  (3.0 s @ 48 kHz, [-1, 1]), output `float32 [1, 6522]` raw logits, scored with a standard
+  sigmoid clipped to `[-15, 15]` before exponentiating — verified equal to `birdnetlib`'s
+  `flat_sigmoid(x, sensitivity=-1)` at its default sensitivity. The output width is
+  asserted against `N_CLASSES_EXPECTED = 6522` at load time and the service **refuses to
+  run** on a mismatch, rather than silently reproduce the §10f class-index bug.
+- **Neither model file ships in the APK.** The FP32 acoustic model and the optional 14.8 MB
+  location/week meta-model (§11d) are `adb push`ed into the app's external files dir —
+  the desktop pipeline this project already trusts already has the identical file, so
+  reusing it over USB is simpler and more honest than a second download path, and needs
+  no network dependency on the station itself. A missing model fails loudly
+  (`IllegalStateException` naming the exact path) rather than a bare native crash.
+- **Thermal response is the station's own, distinct from the OS's.** Every window checks
+  `PowerManager.currentThermalStatus`; at `MODERATE` or above, every other window is
+  skipped rather than scored (`windowsSkippedThermal`, exposed in `/api/health`) — a
+  deliberate degrade, not a die.
+
+### 11c. Non-bird class exclusion
+
+BirdNET's 6522 outputs include **11 acoustic-context classes that are not birds** — `Dog,
+Engine, Environmental, Fireworks, Gun, Human non-vocal, Human vocal, Human whistle, Noise,
+Power tools, Siren`. `analysis/tools/build_station_species.py` hardcodes this set **by
+exact label text**, not by a word-count heuristic: a naive "binomial = two space-separated
+words" rule misclassifies `"Human vocal"` and `"Power tools"` as species (same shape as
+`"Turdus merula"`), which would let human speech reach the dashboard filed as an
+unlabelled bird — precisely the false-positive class this exclusion exists to stop. The
+builder's own verification pass re-checks this against the model's label file after
+writing the asset.
+
+These 11 classes are **tagged (`taxon.group = "non_taxon"`), never removed from the
+6522-wide index** — deleting them would shift every later index, which is exactly the
+§10f bug this project already retracted findings over once. Exclusion happens at two
+points, deliberately redundant:
+
+1. **Write time** (`StationService.onWindow`): `if (sp.group == "non_taxon") continue` —
+   these rows are never inserted at all.
+2. **Read time**, in every query that lists or aggregates detections (`listDetections`,
+   `daySummaries`, `pendingForPublisher`): filtered again by `taxon_key`, not the stored
+   `taxon_group` column, because a row written before the species table was itself
+   corrected has the wrong group baked in permanently — a key never changes retroactively,
+   a stored group can be wrong forever. Belt-and-suspenders, stated in code as such.
+
+### 11d. Regional and seasonal plausibility — a hard drop, then a graded bar
+
+**Two different mechanisms, easy to conflate, deliberately kept apart:**
+
+**(1) The regional hard drop, at write time, unchanged since the station's first
+commit.** `station_species.json`'s `regional` boolean — DOF's official Danish checklist
+(Appendix 1, Categories A/B/C) intersected with BirdNET's classes, with the same
+AviList abbreviated-subspecies expansion `species_lists/build_lists.py` uses (so
+`Corvus cornix`/Hooded Crow, ranked a subspecies by AviList, isn't silently dropped) —
+gates `StationService.onWindow` directly: `if (!sp.regional) continue`. **A species
+absent from the Danish checklist is never written at all, full stop** — not stored as a
+low-confidence candidate, not shown anywhere. A Compact Weaver or Flammulated Owl scored
+in Copenhagen is never real, and this is the one place in the whole curation system that
+drops rather than down-weights. (Contrast the non-taxon classes above, which are also
+dropped — the same treatment, for the same reason: neither is a *detection*.)
+
+**(2) The confirm-threshold penalty, at read time — replaced 2026-08-03.** Everything
+that *does* get written is still only a **candidate** until it clears
+`effectiveThreshold()`. The original design (built with the station's first commit) added
+flat penalties: **`REGIONAL_PENALTY = 0.20`** if a taxon somehow reached this stage
+un-regional (defensive; case (1) already excludes it) and **`SEASONAL_PENALTY = 0.15`**
+if the detection month fell outside a species' plausible GBIF-derived window (the exact
+**+15%** figure) — both additive to `displayThreshold`, capped at `MAX_EFFECTIVE_THRESHOLD
+= 0.99` so a penalty can never make a species literally undetectable (§4's "never drop a
+class, down-weight it," applied a second time, at the threshold rather than the class
+list).
+
+That original design was found to be measuring the wrong question (§9, 2026-08-02): DOF's
+list is a **national checklist including every vagrant ever recorded** — 455 of 6522
+BirdNET classes pass as "Danish" — so it rated Dark-eyed Junco and Wood Pigeon
+identically while quietly deleting only the classes so absurd an observer would have
+noticed the model was guessing. It answered "has this ever occurred in Denmark" where the
+real question is "how likely is this here, this week."
+
+**Replacement: BirdNET's own location/week meta-model** (`MetaModel.kt`,
+`BirdNET_GLOBAL_6K_V2.4_MData_Model_V2_FP16.tflite`, 14.8 MB, also `adb push`ed and
+optional). Input `[lat, lon, week 1–48]`, output raw (un-sigmoided) occurrence values
+for the same 6522-class index — run once at startup for all 48 weeks at the station's
+coordinates (`PriorBuilder`, ~48 cheap inferences, only non-zero priors stored) and
+looked up per detection against the **week the bird was actually heard in**. Measured at
+Copenhagen, week 29: Wood Pigeon 0.99, Blackbird 0.72, Magpie 0.53, Tawny Owl 0.038,
+Spotted Crake 0.0086, Dark-eyed Junco 0.00008 — **five orders of magnitude of range**, so
+the penalty is applied **on a log scale** (`PRIOR_FULL = 0.05`, `PRIOR_PENALTY_PER_DECADE
+= 0.12` per factor-of-ten below it) rather than linearly, which would read the last three
+species as indistinguishably "about zero" when they are a plausible bird, an implausible
+one, and a near-impossible one. Same non-negotiable rule as before: it down-weights, it
+never drops, and a genuinely strong detection of a rare species can still surface.
+
+**When the meta-model is present, it replaces the regional/seasonal booleans for
+threshold purposes entirely.** When it's absent (a station whose model file was never
+pushed), `effectiveThreshold` falls back to the original `REGIONAL_PENALTY`/
+`SEASONAL_PENALTY` addition — a station without the newer file gets the weaker original
+filter, not none at all. `regional`/`in_season`/the prior lookup are all captured **once,
+at detection time, against that detection's own calendar month/week** (`Taxon`'s
+`monthFractions` doc, `Database.withCuration`'s prior lookup) — a July detection is judged
+by July's plausibility forever, never re-evaluated against whatever month the dashboard
+happens to be opened in.
+
+### 11e. Per-species threshold overrides
+
+`species_settings` (`taxon_key → threshold_override`) is a human's precise, standing
+correction for one species — "this Ruddy Shelduck call was actually my daughter's voice,
+raise the bar." Set via `POST /api/species/{key}/threshold`, three body shapes: `{delta}`
+bumps the *current baseline* (override if one exists, else the global default) and clamps
+to `[0,1]` — this is what the feed's **"False positive? +5%" / "+10%"** buttons send, so
+repeated bumps are monotonic; `{threshold}` sets an absolute value; `{threshold: null}`
+clears it. **An override replaces the entire region/season/prior stack for that species —
+it does not stack with it.** Once a person has given a precise number, that number is
+authoritative over every heuristic. Like every other curation setting, this is read-time
+only: it takes effect on the next query, nothing is reprocessed.
+
+### 11f. Curation: confirmed vs. candidate, and the bout-rule correction
+
+Two thresholds govern what's stored vs. what's shown, and the gap between them is
+deliberate: `retentionFloor` (default **0.10**) decides what's **written** — this is the
+one write-time setting, and lowering it later only affects future detections, since rows
+below the old floor were never stored. `displayThreshold` (default **0.65**, BirdNET-Pi's
+common operating point — stated explicitly as *a starting point, not a measurement*, since
+no per-station calibration table exists yet) plus the effective-threshold stack above
+decides what's **confirmed**. Every candidate stays queryable at `state=candidate`.
+
+**The repeat rule originally counted raw detections** (`repeatRequired = 2` within
+`repeatWindowMin = 30` minutes) and broke on real audio: a **19-consecutive-window**
+*Porzana porzana* (Spotted Crake) run, scored 0.918 in August on a Copenhagen balcony (a
+species that calls April–June, at night) — one continuous ~30 s noise event, not 19
+independent hearings. **30 of 47 inter-detection gaps were exactly 1.5 s**, i.e. the hop:
+the rule was measuring how long a sound lasted, divided by the hop interval.
+
+**Fixed to count bouts, not windows.** `boutGapSeconds` (default **60**) — two detections
+of the same species belong to the same bout unless more than 60 s of silence separates
+them; `repeat_count` in the API now reports bout count, keeping its name because its
+*meaning* ("how many times did I hear this") is unchanged even though the old
+implementation was answering a different question. Measured on **19 h of known-negative
+audio** (station run overnight in a lounge with no reachable bird sound, so every one of
+5,499 detections across 101 species is a labelled false positive — a corpus that bounds
+false positives and nothing else, never a target to tune toward):
+
+| stage | false rows | false species |
+|---|---|---|
+| flat threshold + raw-count repeat rule | 102 | 9 |
+| + bout rule (>60 s gap) | 81 | 6 |
+| + prior threshold (§11d) | 50 | 4 |
+
+The bout rule alone is a 21% cut — **necessary, nowhere near sufficient**: Spotted Crake
+survives it because over 19 h it genuinely fired in 151 separate bouts (an intermittent
+source, not a continuous one), and only its markedly nocturnal hourly profile (peaking at
+11pm) versus the display's daytime pattern would flag it further. It's the prior
+threshold that removes it.
+
+**A same-table consistency bug was caught in the process**: `daySummaries` used to skip
+the repeat check as a "cheap approximation," so on a freshly cleared station one 0.675
+row with no repeat made `/api/days` report "1 detection, 1 species" while `/api/species`
+reported 0 confirmed **from the same table in the same second** — the §2d failure mode
+again, two endpoints describing one day and disagreeing. Both now share the same bout
+logic.
+
+**The co-occurrence hypothesis (§8) was tested on this corpus and REFUTED.** The idea —
+suppress any window where ≥3 distinct species fire at once, since that's more plausibly
+one broadband event exciting several classes than three animals calling in the same three
+seconds — removes **zero** false confirmations here (81 before, 81 after) while
+suppressing 250 candidate rows. Of 5,022 detection-producing windows, 4,639 are
+single-species, and the multi-species ones are uniformly low-confidence: the rule can only
+ever discard rows the confidence threshold had already excluded, so it does no work at the
+threshold that actually reaches a person. Logged and killed, not merely left unbuilt.
+
+### 11g. Storage: two floors three orders of magnitude apart, and an 8 GB cap
+
+`CLIP_CAP_BYTES = 8 GB`. `pruneToCapBytes` runs every 10 minutes, deleting the **oldest
+clip files** first until under cap and **nulling `clip_path` on the row** — the detection
+row itself is never deleted by pruning (API.md: `clip` may be `null` for "a candidate
+whose clip was pruned").
+
+**One floor governing both costs was a real bug, not a hypothetical one.** A detection
+row is ~358 bytes; the 3 s WAV clip beside it is ~288,000 bytes — three orders of
+magnitude apart. At a single `retentionFloor = 0.10` gating both, the station wrote
+**5,022 clips in 19 hours** (≈667 GB/year against ≈908 MB/year of rows), so the 8 GB cap
+held **four days** of audio. Fix: a separate **`clipFloor`, default 0.50** — rows still
+retain at 0.10 (where the sub-threshold tail the noise research in §11f depends on stays
+intact, and where a slider can still re-filter it), but only windows scoring ≥0.50 get a
+clip written at all. Same cap now holds **~83 days**, with zero rows dropped to get there.
+Whether *anything* in a window clears the clip floor is decided once per window, not per
+hit — there's only one clip, so if anything in the window is worth keeping, the window is.
+
+**Pinning protects what pruning and clearing must never touch.** `species_status`'s
+`lifer_detection_id` (the detection that first confirmed a species) and `best_detection_id`
+(the strongest evidence on file for it) are exempt from `pruneToCapBytes` and from
+`clearAll`'s default clip deletion — `pinnedDetectionIds()` is consulted by both.
+This is a **live hazard already found**, not defensive caution: `onUpgrade` has issued an
+unconditional `DELETE FROM detections` in **two of the database's five schema versions**,
+and `pruneToCapBytes` was independently found to delete clip files while leaving rows
+behind. Neither was a bug on the day it was written — the life list didn't exist yet — but
+both are fatal to it now, since the audio behind a confirmed lifer is unrecoverable. The
+rule going forward, stated in the code as the single most dangerous habit in the file's
+history: **every migration from schema v5 onward must exclude `pinnedDetectionIds()`.**
+
+### 11h. The life list, and verification as the only gate
+
+Three tables, schema v5: `species_status`, `verifications`, `species_prior` (§11d).
+
+**A species becomes `confirmed` only through `recordVerification`, from a human `"yes"`
+verdict — no score, however high, promotes one.** The list starts **empty**; nothing is
+grandfathered from existing detections, and candidates accumulate only from new
+detections going forward (`noteDetection`, called on every insert, tracks a running
+`best_detection_id` by confidence but never changes `status`). This is the design, not an
+incidental gap: gating the list on a human decision is what turns verification from a
+chore into something with a visible reward, and the dashboard shows the stake above the
+Confirm/Reject buttons ("adds X to your life list — #11") for exactly that reason.
+
+**A rejection is a stronger statement than any score** — the observer listened and said
+no — so `recordVerification(verdict="no")` marks the *species* rejected (only while it has
+never been confirmed; one bad clip can't retract an already-earned lifer) and rejected
+species are excluded from every "what was here" aggregate: the species list, the day
+rollups, the top-species panel. Their detection **rows are deliberately not hidden** from
+the raw feed — rendered at reduced opacity — because seeing the model keep producing a
+rejected call is exactly the signal that a per-species threshold override (§11e) is due;
+hiding it would delete the evidence that something is still wrong. The first confirmed
+detection this station ever produced was a Tawny Owl that turned out to be a child in the
+background — the mechanism earned its keep immediately.
+
+**The Verify tab is a card-stack, one species at a time**, backed by `GET
+/api/verify/queue`: one card per distinct scientific name (`distinctBy`), ordered by
+local-occurrence prior ascending then confidence descending — the rarest, highest-stakes
+calls surface first, while attention is fresh. A card requires the row to still have a
+clip (nothing can be verified by ear without audio, and the clip floor means not every row
+has one). A setup screen states the queue size **before** committing and offers a session
+cap (10/25/all, default 10) that counts cards **presented, not resolved**, so skipping a
+card can't silently extend a session past what it promised.
+
+The card's spectrogram is computed **client-side in the browser**, from the 3 s clip, with
+every constant lifted directly from `Spectrogram.kt` (§11i) — 2048-point Hann, 256
+log-spaced bins 200 Hz–12 kHz, per-bin max, a fixed 35 dB window over a 20th-percentile
+floor — so a verification card looks like an instance of the same instrument as the live
+view, not a different one. One deliberate, documented divergence: the station's live floor
+subtracts a rolling **30 s** history, and a 3 s clip has no 30 s of context, so the
+percentile is taken over the whole clip instead. Still not per-frame normalisation, which
+is the thing that must never happen (§11i).
+
+### 11i. Publisher interface and the offline queue
+
+```kotlin
+interface Publisher {
+    val name: String
+    suspend fun publish(ids: List<Long>): Result<Unit>
+}
+```
+
+Every detection lands in a SQLite outbox (`outbox_delivery`, via `Database.insert` then
+`markDelivered` per publisher) **before any publisher runs**. `LocalPublisher` is the only
+implementation today, and its "publish" is a no-op in substance — the detection is already
+durable the moment `insert` returns, so "delivery" is just recording that fact. The queue
+exists now, while nothing is remote, precisely so that adding a remote publisher later is
+a new `Publisher` implementation reading `pendingForPublisher("your-name")` on a retry
+loop, plus a token — **not** a change to the write path, the schema, or the capture/
+inference loop. The seam is the point, not the implementation.
+
+### 11j. Dashboard: five tabs, SSE feed, and a streamed spectrogram
+
+Restructured (2026-08-03) from a detection feed with tabs bolted on into **Live / List
+(life list) / Verify / Days / Settings**, because the life list is treated as the
+product's spine rather than a feature beside it. Every colour, type, space, radius and the
+spectrogram ramp are CSS custom properties sourced from `.claude/skills/biomon-ui/
+SKILL.md` (`tokens.css`), so a hardcoded hex is now visibly wrong rather than merely
+undisciplined; a subtle grain overlay (2.5% turbulence) keeps dark flat OLED fills from
+reading as plasticky.
+
+- **Live feed via SSE** (`GET /api/events`): `hello` fires immediately with `server_ms` so
+  the client anchors its `since_ms` cursor to the **server's** clock, never its own — phone
+  and browser drift independently, and a skewed client clock would silently skip or
+  repeat detections; `detection` per new row; `status` (the full `/api/health` body) every
+  15 s; a `: keepalive` comment every 15 s to stop intermediaries timing the connection
+  out. The dashboard also polls `/api/detections?since_ms=` as a fallback, since SSE
+  survives a phone hotspot noticeably worse than a plain GET.
+- **The live spectrogram is streamed, not polled.** The first version rebuilt it in JS
+  from a 3 s WAV polled once a hop — latency, tearing, a hard resolution ceiling, periodic
+  jitter. It was replaced with a dedicated WebSocket (`/api/spectrogram`) over which the
+  phone streams one **265-byte binary column** per FFT frame at a **30 columns/s** target:
+  byte 0 message type, bytes 1–8 a little-endian `float64` timestamp in epoch seconds,
+  bytes 9–264 256 magnitude bytes. Fed from `AudioCapture`'s separate continuous PCM tap
+  (§11b) rather than the 50%-overlapping inference windows, so nothing is drawn twice.
+  Column timestamps derive from the **sample counter against a wall-clock anchor**, not
+  the clock at emit time — BirdNET runs synchronously on the same capture thread, so an
+  emit-time stamp would encode its own ~190 ms stall as jitter in a display whose only job
+  is to look continuous. **Backpressure drops the oldest queued frame on overflow** rather
+  than buffering: a late column is not late data, it is *wrong* data, since the client
+  always draws the newest column at the right edge as though it were now.
+- **256 log-spaced bins, 200 Hz–12 kHz** (`Spectrogram.kt`) — log-spaced because a linear
+  axis to 22 kHz spent half its height on 11–22 kHz, where a Copenhagen balcony has
+  nothing, and crushed every bird into the bottom strip. Within a bin range the **max**, not
+  the mean, is taken — a bird call is a narrow peak, and averaging it with the silence
+  beside it low-passes exactly the thing being looked for.
+- **Adaptive noise floor, never per-frame normalisation.** Per-frame min/max stretches a
+  quiet frame's noise to full brightness, which is why an earlier version was a solid
+  purple wash of traffic rumble. Instead each of the 256 bins keeps a rolling **30 s**
+  history and subtracts its own **20th-percentile**, so a steady sound (traffic, wind, a
+  fridge two floors down) *is* its own percentile and subtracts to zero. Made cheap on a
+  2017 Snapdragon 835 (already spending ~190 ms of every 1.5 s hop inside BirdNET, §11n) by
+  an **incremental per-bin 1 dB histogram** (2 array writes/bin/frame, not a 230k-element
+  sort 30×/second) with the percentile itself walked only **twice a second**, and the
+  *applied* floor **gliding** toward each new target between refreshes rather than
+  stepping — a step every 15 frames would draw a visible seam across the whole strip twice
+  a second, which the eye catches instantly.
+- **Palette: a custom five-stop amber ramp, not matplotlib's magma.** `#100D0B → #3B2416 →
+  #8A4A1E → #E8A33D → #FFF3D6`, defined as `--spec-00`…`--spec-100` in `tokens.css` and
+  interpolated into a 256-entry LUT client-side via `getComputedStyle`, so the palette
+  stays single-sourced with the rest of the design system rather than duplicated as a JS
+  constant. (Worth being precise about: this is the project's own "ember" ramp, built to
+  match the dashboard's design tokens — it is visually magma-*like* in that both run
+  dark→warm→pale, but it is not the standard scientific magma colormap.)
+- **Species photos** (`PhotoCache.kt`, forked from §10's fetcher) — same two governing
+  lessons: **batch** (MediaWiki accepts up to 50 titles/request, so ~11 requests covers the
+  whole species list) and **never conflate a transport failure with "no photo"** (§2d) —
+  the API's `photo` field is only ever `null` for "not available right now," and the cache
+  tracks the real reason internally. Runs on a 10-minute tick (first fire delayed 30 s to
+  let initial detections land), gated on validated internet connectivity, against
+  **confirmed** taxa only.
+- **Per-species "False positive? +5% / +10%" bump buttons** in the feed (§11e).
+- **Settings' "Clear all"** previews before it destroys: `GET /api/data` returns
+  detection/clip/confirmed-species/pinned-clip counts; `DELETE /api/data` executes and
+  reports what it *actually* deleted (row/clip counts, whether the life list survived) —
+  the earlier version reported only `"Cleared."` even when it had left photos and orphaned
+  clips behind, which is how it earned the description "it didn't clear everything." The
+  life list is kept by default (only `candidate` species purged; `confirmed`/`rejected` are
+  human decisions and survive) unless the caller explicitly opts in with
+  `?life_list=true` — destroying it is a separate, deliberate act.
+- **Photo lightbox** for full-size viewing from any thumbnail.
+- **Build stamp in the header**, beside the station name, not tucked into Settings — it
+  answers "is this the build I just installed," not "what's the device's health," which are
+  different questions. (§11k)
+
+### 11k. Schema, versioning, and build identity
+
+`station.db` (`SQLiteOpenHelper`, current version **5**): `detections`, `species_settings`,
+`outbox_delivery`, `species_status`, `verifications`, `species_prior`. `onUpgrade`'s
+history is worth reading in the source (`Database.kt`) precisely because two of its five
+versions issued an unconditional `DELETE FROM detections` before the life list existed to
+protect — left in place rather than rewritten, since a device that already ran them can't
+un-run them, with the v5-onward pinning rule (§11g) as the fix that actually matters going
+forward.
+
+**A build stamp exists because `versionName` couldn't answer the only question that
+actually got asked.** `versionName` stayed `"0.1.0"` across six installs in one session
+while the running code changed underneath each time — real, costly confusion (four
+backend builds shipped against an older dashboard with nothing on screen to tell them
+apart). `build.gradle.kts` resolves the short git commit and a dirty-tree flag at
+*configuration* time (`git rev-parse --short=8 HEAD`, `git status --porcelain`), failing
+soft to `"nogit"` if there's no repository, and stamps both plus the build timestamp into
+`BuildConfig` — surfaced in `/api/health` (`app.commit`, `app.built_at`) and the dashboard
+header. A trailing `+` on the commit means the tree was dirty at build time, because
+"which commit" is a lie if uncommitted edits went into the APK.
+
+**No new Gradle dependencies** (`build.gradle.kts`'s explicit rule): everything the module
+uses is already in the cache `:app` populated, which is why the HTTP server is a
+hand-written `ServerSocket` implementation (one thread per connection — adequate for "a
+LAN appliance serving a handful of concurrent viewers plus long-lived SSE subscribers")
+rather than a pulled-in NanoHTTPD or Ktor. A dependency that won't resolve offline is a
+build that fails on the day the wifi is down.
+
+### 11n. Measured performance
+
+- **Inference: ~190 ms per 3.0 s/1.5 s-hop window on the OnePlus 5T**, 4 threads, the
+  full 6522-class FP32 model (not a quantised or embedder-only chain — unlike the
+  live-display work in §10g, the station always had to run the acoustic model itself,
+  since it *is* the detector, not a candidate preview of one). `/api/health`'s
+  `inference.duty_pct` is computed directly as `last_inference_ms / (hop_s × 1000)`: at
+  190 ms over a 1500 ms hop that's **≈12.7%**, matching the ~12% figure observed in
+  practice.
+- **End-to-end latency** — sound occurring to it appearing on the dashboard — is bounded
+  below by the 3.0 s window itself (a detection can't exist before its window closes) plus
+  scheduling/network/DB overhead, landing observationally in the **3–5 s** range. This is
+  the cadence implied by the window/hop/inference numbers above, not a separately
+  instrumented end-to-end trace.
+- **Thermal degrade, not OS throttling**: §11b's every-other-window skip at
+  `THERMAL_STATUS_MODERATE`+ is the station's own decision (`thermal.throttled` in
+  `/api/health` is explicitly documented as "the station's own decision, not the OS's" —
+  the dashboard is told to say so plainly rather than hide it).
+- **Spectrogram cost was engineered, not assumed affordable**: the incremental histogram
+  and twice-a-second percentile refresh (§11j) exist specifically because a true 20th
+  percentile over 900 frames × 256 bins, sorted 30×/second, is ~230k elements/second on a
+  chip already spending ~190 ms of every 1.5 s hop inside BirdNET — nowhere close. The FFT
+  itself (2048-point, hand-written radix-2, ~11k butterflies/column) is "well under a
+  millisecond" per column at 30 columns/s. **Explicitly not yet measured on-device**: the
+  spectrogram's own achieved frame rate and thermal cost — `measured_cps` and
+  `frames_dropped` are exposed in `/api/health` for exactly that measurement, not yet
+  taken as of the streaming rewrite.
 
 ## Current State (as built)
 
