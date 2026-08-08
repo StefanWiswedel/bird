@@ -1949,7 +1949,16 @@ gitignored, restorable only over adb from a computer) — so the key is in the A
 filename and leads the release body, and Gradle rather than the workflow decides it, so
 there is only one copy of that decision. The workflow degrades to deriving the label from
 whether the secret was set, with a warning, rather than failing a job whose compile already
-succeeded. The keystore to upload as a secret is the **existing
+succeeded.
+
+The label is still only a claim about which *config* was selected, though, and the thing
+that actually decides an install is the certificate in the file. So the workflow reads it
+back out of the finished APK with `apksigner` and publishes the **SHA-256 fingerprint and
+DN** in the release body, in the same lower-case colon-free form `keytool` can be coaxed
+into printing for the local keystore. That turns "is this the key the phone trusts?" from
+a thing you assume into a thing you compare. Like the label, it is best-effort: a missing
+`apksigner` reports `unavailable` and does not fail a build that already compiled —
+absence means "not verified here", never "verified fine". The keystore to upload as a secret is the **existing
 `~/.android/debug.keystore`** from the machine that first built the app; supplying a newly
 generated one instead would force exactly one wipe.
 

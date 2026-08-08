@@ -127,6 +127,20 @@ The APK's filename and the release body both name the key that was used (`debugk
 `releasekey`), because whether an install succeeds or costs a wipe depends entirely on it
 and should not require inspecting the file to find out.
 
+That label says which signing *config* Gradle chose, which is not quite the same claim as
+which key ended up in the file — `releasekey` means a keystore was supplied, not that it
+is the keystore the phone trusts. So the workflow also reads the certificate back out of
+the finished APK with `apksigner` and puts its **SHA-256 fingerprint and DN in the release
+body**. Check it once against the machine that first installed the station:
+
+```bash
+keytool -list -v -keystore ~/.android/debug.keystore -storepass android \
+  | awk '/SHA256:/ {gsub(/:/,"",$2); print tolower($2)}'
+```
+
+Same fingerprint as the release: it installs over the top. Different: it would force an
+uninstall, and an uninstall takes `station.db` and the models with it.
+
 `versionCode` comes from the CI run number (`STATION_VERSION_CODE`), defaulting to `1`
 locally. Sideloading an update requires it to increase.
 

@@ -123,6 +123,31 @@ jobs:
             exit 1
           fi
 
+          # THE SIGNING CERTIFICATE ITSELF, read back out of the finished APK.
+          #
+          # Everything above reports which signing CONFIG Gradle chose. That is not the same
+          # claim as which KEY is in the file, and the difference is the one that costs data:
+          # a `releasekey` label only means a keystore was supplied, not that it is the
+          # keystore the phone already trusts. The certificate fingerprint is checkable
+          # against the phone's own key (`keytool -list -v -keystore ~/.android/debug.keystore`)
+          # and settles it, so it goes in the release body where it is read before installing.
+          #
+          # Best-effort, exactly like the label above: a missing apksigner must not throw away
+          # a successful build. Absent means "not verified here", never "verified fine".
+          CERT_SHA="unavailable"
+          CERT_DN="unavailable"
+          APKSIGNER="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n1 || true)"
+          if [ -n "$APKSIGNER" ] && CERTS="$("$APKSIGNER" verify --print-certs "$SRC" 2>/dev/null)"; then
+            CERT_SHA="$(printf '%s\n' "$CERTS" | grep -m1 -i 'SHA-256 digest' | sed 's/.*digest: *//' || true)"
+            CERT_DN="$(printf '%s\n' "$CERTS" | grep -m1 -i 'certificate DN' | sed 's/.*DN: *//' || true)"
+            [ -n "$CERT_SHA" ] || CERT_SHA="unavailable"
+            [ -n "$CERT_DN" ] || CERT_DN="unavailable"
+          else
+            echo "::warning::apksigner unavailable or refused the APK; the release will not"\
+                 "state a certificate fingerprint. Verify the signer by hand before installing"\
+                 "over an existing build."
+          fi
+
           # A tag push names itself. Everything else — a merge to main, a dispatch with no
           # input — gets a run-numbered build tag, so neither can silently overwrite a
           # version release.
@@ -141,6 +166,8 @@ jobs:
             echo "tag=$TAG"
             echo "name=$NAME"
             echo "path=dist/$NAME"
+            echo "cert_sha256=$CERT_SHA"
+            echo "cert_dn=$CERT_DN"
           } >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
@@ -152,6 +179,8 @@ jobs:
         run: |
           set -eu
           KEY="${{ steps.apk.outputs.key }}"
+          CERT_SHA="${{ steps.apk.outputs.cert_sha256 }}"
+          CERT_DN="${{ steps.apk.outputs.cert_dn }}"
           {
             # The install verdict LEADS. Whether this file is usable at all is the first
             # thing a reader needs, and for a debugkey build the answer is no.
@@ -184,10 +213,27 @@ jobs:
             echo "| commit | \`${GITHUB_SHA}\` |"
             echo "| versionCode | \`${GITHUB_RUN_NUMBER}\` |"
             echo "| signed with | **${KEY}** |"
+            echo "| signer certificate | \`${CERT_SHA}\` |"
+            echo "| signer DN | \`${CERT_DN}\` |"
             echo
             echo "Android refuses to install an APK over one signed with a different key, and"
             echo "the only way through is an uninstall — which takes \`station.db\` and the"
-            echo "models with it. Check the key above before installing anything."
+            echo "models with it. The label above says which signing *config* was used; the"
+            echo "**certificate fingerprint is what actually decides**, and unlike the label"
+            echo "it can be checked against the key on the machine that first installed the"
+            echo "station. This prints it in the same form as the table above — lower-case"
+            echo "hex, no colons — so the two can be compared directly:"
+            echo
+            echo '```bash'
+            # \$2 and \" so the awk script reaches the release body verbatim. A heredoc
+            # would be cleaner but its body has to sit at column 1, which ends the YAML
+            # block scalar this whole step lives in.
+            echo "keytool -list -v -keystore ~/.android/debug.keystore -storepass android \\"
+            echo "  | awk '/SHA256:/ {gsub(/:/,\"\",\$2); print tolower(\$2)}'"
+            echo '```'
+            echo
+            echo "Same fingerprint: installs over the top, no uninstall, no data loss."
+            echo "Different fingerprint: **do not install it** — it would force an uninstall."
             echo
             echo "Install by opening this page in the phone's browser and tapping the APK."
             echo "The dashboard updates separately — Settings → Update dashboard."
