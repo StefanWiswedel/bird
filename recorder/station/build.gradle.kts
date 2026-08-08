@@ -22,9 +22,18 @@ fun secret(property: String, env: String): String? =
 // through is an uninstall, and uninstalling this app deletes station.db AND the ~67 MB of
 // BirdNET models in getExternalFilesDir("models"), which are gitignored and restorable
 // only over adb from a computer — precisely what the release flow exists to avoid. So the
-// key must never change, and the FALLBACK matters as much as the config: with no keystore
-// supplied we sign with the debug key, which is the key the phone already has, rather than
-// emitting an unsigned APK that Android will not install at all.
+// key must never change: only a build with a keystore configured here is installable as
+// an update.
+//
+// THE DEBUG FALLBACK IS NOT AN INSTALLABLE SUBSTITUTE, and must not be described as one.
+// Gradle's debug signing config reads ~/.android/debug.keystore from the machine doing
+// the building. Locally that is a stable file, so debug builds install over each other.
+// On a CI runner it does not exist at all, so AGP generates one on the spot with a fresh
+// random key — different from the developer machine's, and different again on the next
+// run. The fallback exists so an assembleRelease without secrets still produces a
+// verifiable APK instead of an unsigned one that cannot be installed even once; the
+// artifact is build verification, not an update. The workflow labels it `debugkey` and
+// says exactly that at the top of the release.
 val stationKeystore = (providers.gradleProperty("stationKeystore").orNull
     ?: System.getenv("STATION_KEYSTORE"))
     ?.takeIf { it.isNotBlank() }?.let { file(it) }?.takeIf { it.isFile }

@@ -999,14 +999,19 @@ its own measurement.
   either is renamed into place; any failure writes nothing and reports *which* failure it
   was, per §2d. Serving falls back to the bundled asset whenever the stored file is
   missing, so a botched update cannot leave a phone with no adb and no dashboard.
-  Separately, `.github/workflows/release.yml` now builds `:station` and attaches the APK to
-  a release, because the install path is now "open the release page in the phone's browser
-  and tap the file". Its `signingConfig` **falls back to the debug key** when no keystore
-  secret is set, and the APK's filename and the release body both name the key that signed
-  it: an APK signed with a different key than the one on the phone cannot install over the
-  top, and the only remedy is an uninstall, which deletes `station.db` and the ~67 MB of
-  BirdNET models — restorable only over adb from a computer, which is the exact thing this
-  whole change exists to stop needing.
+  Separately, `.github/workflows/release.yml` now builds `:station` on every merge to
+  `main` (as `build-<run number>`) and on `v*` tags, and attaches the APK to a release,
+  because the install path is now "open the release page in the phone's browser and tap the
+  file". The APK's filename and the release body both name the key that signed it, because
+  an APK signed with a different key than the one on the phone cannot install over the top,
+  and the only remedy is an uninstall, which deletes `station.db` and the ~67 MB of BirdNET
+  models — restorable only over adb from a computer, which is the exact thing this whole
+  change exists to stop needing. **Only a build signed with the configured keystore is
+  installable as an update**: the `signingConfig` falls back to the debug config when no
+  keystore secret is set, but on a CI runner that means a randomly generated per-run key,
+  so a `debugkey` release is build verification and nothing more. This was first written
+  down as though the fallback were installable; it is not, and the release body now leads
+  with that.
 - (2026-08-03) **§11 written: the bird station's full architecture documented.** The
   station (`recorder/station`, built 2026-08-02 onward) had been accumulating design
   decisions and measurements in this changelog and in §8 without a home describing the
@@ -1923,18 +1928,30 @@ beside the commit, reading `ui bundled` when nothing has ever been pulled.
 
 **Releases** (`.github/workflows/release.yml`). The install path is now "open the release
 page in the phone's browser and tap the APK", so CI has to produce an APK that actually
-installs. Two things make that true, and both are about not destroying data. `versionCode`
-comes from the CI run number rather than being hardcoded to `1`, or every update after the
-first is refused as a downgrade. And the release build gets a `signingConfig` that **falls
-back to the debug key** when no keystore is configured: an unsigned APK does not install at
-all, and an APK signed with a *different* key than the one on the phone cannot install over
-the top — the only remedy is an uninstall, which deletes `station.db` and the two BirdNET
-models (~67 MB, gitignored, restorable only over adb from a computer). Which key signed a
-build therefore determines whether the next install is free or costs a wipe, so it is in
-the APK's filename and in the release body, and Gradle — not the workflow — decides it and
-writes it out, so there is only ever one copy of that decision. The keystore to upload as
-a secret is the **existing `~/.android/debug.keystore`** from the machine that first built
-the app; supplying a newly generated one instead would force exactly one wipe.
+installs. It builds on every merge to `main`, publishing `build-<run number>` the way the
+insect repo's workflow does, and separately on a `v*` tag for real versions —
+run-numbered builds cannot overwrite a version release. `versionCode` comes from the CI run
+number rather than being hardcoded to `1`, or every update after the first is refused as a
+downgrade.
+
+**Only a release signed with the configured keystore is installable as an update, and the
+debug fallback is not a substitute for one.** This was initially written down wrongly and
+is worth stating precisely, because the failure it invites is a wipe. Gradle's debug
+signing config reads `~/.android/debug.keystore` from the machine doing the building — a
+stable file locally, which is why local debug builds install over each other, but a file a
+CI runner does not have at all, so AGP generates one with a fresh random key per run. A
+CI `debugkey` APK therefore installs over neither the phone's current build nor the
+previous CI build. The fallback earns its place only by keeping `assembleRelease` from
+emitting an *unsigned* APK, which cannot be installed even once; the artifact is build
+verification. Which key signed a build decides whether the next install is free or costs an
+uninstall — and an uninstall deletes `station.db` and the two BirdNET models (~67 MB,
+gitignored, restorable only over adb from a computer) — so the key is in the APK's
+filename and leads the release body, and Gradle rather than the workflow decides it, so
+there is only one copy of that decision. The workflow degrades to deriving the label from
+whether the secret was set, with a warning, rather than failing a job whose compile already
+succeeded. The keystore to upload as a secret is the **existing
+`~/.android/debug.keystore`** from the machine that first built the app; supplying a newly
+generated one instead would force exactly one wipe.
 
 **Cross-origin.** The dashboard resolves a configurable station base (`?station=`, then
 `localStorage`, then `""` for same-origin) and prefixes every request with it — including

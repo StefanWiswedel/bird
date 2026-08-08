@@ -79,9 +79,18 @@ The dashboard is then at `http://<phone-ip>:8848`.
 
 ## Releases, and the keystore that must not change
 
-`.github/workflows/release.yml` builds `:station` and attaches the APK to a GitHub Release
-on a tag push (`v*`) or a manual run. The phone installs it by opening the release page in
-its own browser and tapping the file — there is no adb once the station is deployed.
+`.github/workflows/release.yml` builds `:station` and attaches the APK to a GitHub Release.
+It runs on every merge to `main` (published as `build-<run number>`), on a `v*` tag push,
+and on manual dispatch. The phone installs a release by opening its page in the phone's own
+browser and tapping the file — there is no adb once the station is deployed.
+
+**Without the signing secrets below, a release is build verification only — it cannot be
+installed as an update.** Gradle's debug signing config reads `~/.android/debug.keystore`
+from the machine doing the building, and a CI runner has no such file, so one is generated
+with a random key for that run alone. An APK signed that way will not install over the
+build on the phone, and will not install over the previous CI build either; each run's key
+differs from every other. The workflow labels those APKs `debugkey` and leads the release
+body with the warning. Set the secrets to get releases that install over the top.
 
 **Read this before setting the secrets.** Android will not install an APK over one signed
 with a different key. The only way through is an uninstall, and uninstalling deletes
@@ -108,11 +117,15 @@ base64 -w0 ~/.android/debug.keystore    # the value for STATION_KEYSTORE_BASE64
 | `STATION_KEY_ALIAS` | `androiddebugkey` for the debug keystore |
 | `STATION_KEY_PASSWORD` | `android` for the debug keystore |
 
-**With no secrets set the workflow still works**: `build.gradle.kts` falls back to the
-debug signing config, which is a valid, installable APK — an unsigned one would not
-install at all. The APK's filename and the release body both say which key was used
-(`debugkey` or `releasekey`), because whether the next install succeeds depends entirely
-on that and it should not require inspecting the file to find out.
+**With no secrets set the workflow still completes** — `build.gradle.kts` falls back to the
+debug signing config so the build produces a real APK rather than an unsigned one that
+cannot be installed even once. But as above, that APK is signed with a key the runner made
+up for that run: it proves the code compiles and is **not** installable over anything. Do
+not hand a `debugkey` release to the phone expecting an update.
+
+The APK's filename and the release body both name the key that was used (`debugkey` or
+`releasekey`), because whether an install succeeds or costs a wipe depends entirely on it
+and should not require inspecting the file to find out.
 
 `versionCode` comes from the CI run number (`STATION_VERSION_CODE`), defaulting to `1`
 locally. Sideloading an update requires it to increase.
