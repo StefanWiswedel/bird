@@ -573,7 +573,8 @@ footer { text-align: center; padding: var(--space-32) var(--space-16); }
            stayed 0.1.0 throughout — so this shows the commit, with a trailing "+" when the
            tree was dirty at build time. -->
       <span class="label brand-station"><span id="stationName">station</span><span
-        id="buildStamp" class="build-stamp"></span></span>
+        id="buildStamp" class="build-stamp"></span><span
+        id="dashStamp" class="build-stamp"></span></span>
     </div>
     <span class="spacer"></span>
     <span class="pill" id="statusPill"><span class="dot"></span><span id="statusText">connecting</span></span>
@@ -736,6 +737,25 @@ footer { text-align: center; padding: var(--space-32) var(--space-16); }
     <div class="label eyebrow">Station</div>
     <div class="card"><dl class="kv" id="stationKv"></dl></div>
 
+    <!-- Sits beside the build identity because it answers the same question the header's
+         build stamp does — "is the phone running what I just built?" — for the half of the
+         answer the commit no longer covers. -->
+    <div class="label eyebrow">Dashboard</div>
+    <div class="card">
+      <dl class="kv" id="dashboardKv"></dl>
+      <div style="display:flex;align-items:center;gap:var(--space-16);flex-wrap:wrap;margin-top:var(--space-16)">
+        <button type="button" class="btn" id="updateDashBtn">Update dashboard</button>
+        <span class="note" id="updateDashNote"></span>
+      </div>
+      <div class="note" style="margin-top:var(--space-12)">Pulls <span class="data">index.html</span> and
+      <span class="data">tokens.css</span> from the repository over the internet and replaces the copies
+      stored on the phone. The station downloads both in full before writing either, so a failed update
+      leaves the dashboard you are reading untouched. The page reloads on success.</div>
+      <!-- The source is fixed when the APK is built and cannot be set from here. That is
+           what makes an unauthenticated update button safe, so it is stated, not hidden. -->
+      <div class="note" id="dashSource" style="margin-top:var(--space-12);word-break:break-all"></div>
+    </div>
+
     <div class="label eyebrow">Danger zone</div>
     <div class="card">
       <div style="display:flex;align-items:center;gap:var(--space-16);flex-wrap:wrap">
@@ -788,8 +808,40 @@ function el(html) {
 }
 function $(id) { return document.getElementById(id); }
 
+/* =============================================================================
+   0b. WHERE THE STATION IS
+
+   On the phone this page is served BY the station, so the base is "" and every
+   request is same-origin — byte-identical in effect to hardcoding the paths, which
+   is the point: the deployed dashboard must not change behaviour because this
+   exists. The base is only non-empty when the page is opened from somewhere else
+   (a laptop editing this file, a local mock, a copy served from a different port),
+   which is what makes iterating on the UI possible without a phone.
+
+     ?station=http://192.168.1.42:8848   set it, and remember it
+     ?station=                            clear it, back to same-origin
+     (no param)                           whatever was remembered, else same-origin
+
+   The scheme must be included: the value is used to build the WebSocket URL too,
+   and "192.168.1.42:8848" is not something a browser can turn into an origin.
+   ========================================================================== */
+const STATION = (() => {
+  let stored = null;
+  try { stored = localStorage.getItem("stationBase"); } catch (e) { /* private mode */ }
+  const param = new URLSearchParams(location.search).get("station");
+  if (param === null) return stored || "";
+  const v = param.trim().replace(/\/+$/, "");
+  try { v ? localStorage.setItem("stationBase", v) : localStorage.removeItem("stationBase"); } catch (e) {}
+  return v;
+})();
+
+/* Every station-relative path goes through here — including the `url` fields the API
+   hands back (clip.url, photo.url), which are server-relative and would otherwise be
+   resolved by the browser against THIS page's origin rather than the station's. */
+function stationUrl(path) { return STATION + path; }
+
 async function api(path) {
-  const r = await fetch(path, { cache: "no-store" });
+  const r = await fetch(stationUrl(path), { cache: "no-store" });
   if (!r.ok) throw new Error(path + " -> " + r.status);
   return r.json();
 }
@@ -800,7 +852,7 @@ async function api(path) {
    ever substitutes invented data for a missing response. */
 async function apiMaybe(path) {
   try {
-    const r = await fetch(path, { cache: "no-store" });
+    const r = await fetch(stationUrl(path), { cache: "no-store" });
     if (!r.ok) return null;
     return await r.json();
   } catch (e) {
@@ -834,7 +886,10 @@ const GLYPH_BIRD = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
    Absence of a field and an explicit null are different answers; treating them the same
    is the mistake DESIGN.md §2d is about. */
 function thumbHtml(photo, taxonKey) {
-  const url = (photo && photo.url) || (taxonKey ? "/api/photo/" + encodeURIComponent(taxonKey) : null);
+  const path = (photo && photo.url) || (taxonKey ? "/api/photo/" + encodeURIComponent(taxonKey) : null);
+  // photo.url is server-relative, so cross-origin it must be resolved against the
+  // station and not against whatever is serving this page.
+  const url = path === null ? null : stationUrl(path);
   const img = url
     ? `<img class="thumb-img" src="${esc(url)}" alt="" loading="lazy" onerror="this.remove()">`
     : "";
@@ -850,6 +905,9 @@ function localDate(ms) {
 }
 /* Specimen-label stamp, exactly as §6 specifies: 2026-08-02 · 21:13 */
 function stamp(ms) { return localDate(ms) + " · " + fmtClock(ms); }
+/* The header's version of it — 08-02 21:13. Same year-dropping rule the feed uses for
+   a row that is not from today; the header has room for an identity marker, not a date. */
+function shortStamp(ms) { return localDate(ms).slice(5) + " " + fmtClock(ms); }
 function relTime(ms) {
   const s = Math.max(0, (Date.now() - ms) / 1000);
   if (s < 60) return "just now";
@@ -1089,11 +1147,19 @@ function pumpSpectrogram() {
   if (n < due) { spec.paceAnchor = now; spec.paceDrawn = 0; } else { spec.paceDrawn += n; }
 }
 
+/* The spectrogram must follow the CONFIGURED station, not the origin serving this page.
+   location.host is the same thing on the phone and the wrong thing everywhere else — a
+   page opened from a laptop would open a socket back to the laptop and then sit forever
+   showing "waiting for the first column", which reads as a broken station. */
+function spectrogramUrl() {
+  const base = STATION || location.origin;
+  return base.replace(/^http/, "ws") + "/api/spectrogram";     // http->ws, https->wss
+}
+
 function connectSpectrogram() {
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
   let ws;
   try {
-    ws = new WebSocket(proto + "//" + location.host + "/api/spectrogram");
+    ws = new WebSocket(spectrogramUrl());
   } catch (e) {
     scheduleSpectrogramReconnect();
     return;
@@ -1176,6 +1242,17 @@ function renderHealth(h) {
   // Tolerates an older station that predates the app block rather than rendering "undefined".
   $("buildStamp").textContent = h.app ? `${h.app.version} ${h.app.commit}` : "";
   if (h.app) $("buildStamp").title = `built ${h.app.built_at}`;
+  // The DASHBOARD's own stamp, beside the APK's. Since the UI updates independently of
+  // the build (Settings → Update dashboard), the commit alone no longer says what is on
+  // screen — two builds of the same APK can be running two different dashboards.
+  // "ui bundled" means nothing has been pulled: what is running is what shipped.
+  const dash = h.dashboard;
+  $("dashStamp").textContent = !dash ? ""
+    : dash.updated_at_ms ? "ui " + shortStamp(dash.updated_at_ms)
+    : "ui bundled";
+  if (dash) $("dashStamp").title = dash.updated_at_ms
+    ? `dashboard files written ${new Date(dash.updated_at_ms).toLocaleString()}`
+    : "dashboard is the copy bundled in the APK — never updated over the network";
 
   const pill = $("statusPill");
   pill.className = "pill " + (h.listening ? "is-alive" : "is-down");
@@ -1274,7 +1351,7 @@ function detRowHtml(d, isNew) {
       <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
     </button>
     <div class="det-detail">
-      ${d.clip ? `<audio controls preload="none" src="${esc(d.clip.url)}"></audio>`
+      ${d.clip ? `<audio controls preload="none" src="${esc(stationUrl(d.clip.url))}"></audio>`
                : `<span class="note">Clip not available — pruned by the storage cap.</span>`}
       <div class="det-meta">
         <span>${esc(relTime(d.detected_at_ms))}</span>
@@ -1343,7 +1420,7 @@ async function onBump(btn) {
   const label = row.querySelector(".common").textContent;
   note.textContent = "…";
   try {
-    const r = await fetch(`/api/species/${encodeURIComponent(row.dataset.taxonKey)}/threshold`, {
+    const r = await fetch(stationUrl(`/api/species/${encodeURIComponent(row.dataset.taxonKey)}/threshold`), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ delta: parseFloat(btn.dataset.delta) }),
     });
@@ -1775,7 +1852,7 @@ function verifyPhotoHtml(card) {
   // The glyph sits UNDER the image, so a URL the API handed us that 404s anyway reveals
   // the designed placeholder instead of a broken tile — same trick as thumbHtml.
   const img = (p && p.url)
-    ? `<img src="${esc(p.url)}" alt="Reference photograph of ${esc(card.taxon.common || card.taxon.scientific)}"
+    ? `<img src="${esc(stationUrl(p.url))}" alt="Reference photograph of ${esc(card.taxon.common || card.taxon.scientific)}"
             loading="lazy" onerror="this.remove()">`
     : "";
   return `<span class="v-photo">${img || GLYPH_BIRD}</span>`;
@@ -2032,7 +2109,7 @@ async function loadClip(card) {
   }
   const myId = card.id;
   try {
-    const r = await fetch(card.clip.url, { cache: "no-store" });
+    const r = await fetch(stationUrl(card.clip.url), { cache: "no-store" });
     if (!r.ok) throw new Error("clip " + r.status);
     const bytes = await r.arrayBuffer();
     if (verify.queue[verify.i] && verify.queue[verify.i].id !== myId) return;   // card moved on
@@ -2138,7 +2215,7 @@ async function onVerdict(verdict) {
   document.querySelectorAll("[data-verdict]").forEach(b => b.disabled = true);
   if (err) err.textContent = "";
   try {
-    const r = await fetch("/api/verify/" + encodeURIComponent(card.id), {
+    const r = await fetch(stationUrl("/api/verify/" + encodeURIComponent(card.id)), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ verdict }),
     });
@@ -2443,6 +2520,18 @@ function renderDiagnostics() {
     ["Pruned", h.storage.pruned_total],
   ]);
 
+  // Older stations serve the dashboard straight from the APK and report no block at all;
+  // that is a stale station, not an error, so it degrades to one honest line — the same
+  // treatment the spectrogram block gets above.
+  const dash = h.dashboard;
+  kv($("dashboardKv"), dash ? [
+    ["Serving", dash.stored ? "files on the phone" : "the copy inside the APK"],
+    ["Updated", dash.updated_at_ms ? esc(stamp(dash.updated_at_ms)) : "never pulled"],
+  ] : [["Dashboard", "served from the APK by this station build"]]);
+  $("dashSource").textContent = dash && dash.source
+    ? "Source, fixed at build time: " + dash.source
+    : "";
+
   kv($("stationKv"), [
     ["Name", esc(h.station.name || "—")],
     ["Id", esc(h.station.id)],
@@ -2463,7 +2552,7 @@ $("settingsForm").addEventListener("submit", async e => {
     region_season_filter_enabled: $("regionSeasonFilterEnabled").checked,
   };
   try {
-    const r = await fetch("/api/settings", {
+    const r = await fetch(stationUrl("/api/settings"), {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
     });
     const out = await r.json();
@@ -2482,12 +2571,78 @@ $("settingsForm").addEventListener("submit", async e => {
   setTimeout(() => { note.textContent = ""; }, 3000);
 });
 
+/* Turns the endpoint's per-file report into one sentence a person can act on. §2d again:
+   "failed" is not a reason, and the three things that actually go wrong here — the phone
+   is off the network, GitHub said no, what came back was not the dashboard — need three
+   different responses from whoever is holding the phone. Every branch also states that
+   nothing was overwritten, because that is the question you ask next. */
+function dashboardFailureText(out) {
+  const head = {
+    network: "The station could not reach GitHub",
+    tls: "The station could not establish a secure connection",
+    http: "GitHub answered, but not with the file",
+    truncated: "The download was cut short",
+    validation: "What came back was not the dashboard",
+    too_large: "What came back was far too big to be the dashboard",
+    write: "The files downloaded but could not be written",
+    storage: "The station has nowhere to write the files",
+  }[out.error] || "The update failed";
+  const bad = (out.files || []).filter(f => !f.ok && f.reason);
+  const detail = bad.length ? bad.map(f => f.reason).join(" · ")
+                            : (out.reason || out.error || "the station gave no reason");
+  return head + " — " + detail + ". Nothing was overwritten.";
+}
+
+$("updateDashBtn").addEventListener("click", async () => {
+  const btn = $("updateDashBtn");
+  const note = $("updateDashNote");
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Updating…";
+  note.textContent = "Fetching index.html and tokens.css from the repository…";
+
+  let out = null;
+  try {
+    const r = await fetch(stationUrl("/api/dashboard/update"), { method: "POST" });
+    // Read the body whatever the status is. A failure comes back as 502 WITH the reason
+    // in it, and an r.ok guard would throw away the only useful sentence in the response.
+    out = await r.json().catch(() => null);
+    if (!out) throw new Error("answered " + r.status + " with no detail");
+  } catch (e) {
+    // This is a different failure from the one above: the browser could not reach the
+    // station at all, so the station never even tried. Said as such.
+    btn.disabled = false;
+    btn.textContent = label;
+    note.textContent = "Could not reach the station to ask it to update — " + e.message + ".";
+    return;
+  }
+
+  if (out.updated) {
+    note.textContent = "Updated " + (out.files || []).map(f => `${f.name} (${fmtBytes(f.bytes)})`).join(", ")
+      + ". Reloading…";
+    // HARD reload with a cache-buster, because the whole point of the button is to see
+    // the dashboard that was just written — a soft reload is entitled to re-serve the
+    // copy already in the browser's cache, which would look exactly like a failed update.
+    // The existing query string is preserved so ?station= survives the reload.
+    setTimeout(() => {
+      const u = new URL(location.href);
+      u.searchParams.set("_", String(Date.now()));
+      location.replace(u.toString());
+    }, 700);
+    return;
+  }
+
+  btn.disabled = false;
+  btn.textContent = label;
+  note.textContent = dashboardFailureText(out);
+});
+
 $("clearAllBtn").addEventListener("click", async () => {
   const note = $("clearAllNote");
   if (!confirm("Delete every detection and clip on this station? This cannot be undone.")) return;
   note.textContent = "Clearing…";
   try {
-    const r = await fetch("/api/data", { method: "DELETE" });
+    const r = await fetch(stationUrl("/api/data"), { method: "DELETE" });
     if (!r.ok) throw new Error("request failed");
     note.textContent = "Cleared.";
     state.cursorMs = 0;
@@ -2512,7 +2667,7 @@ $("clearAllBtn").addEventListener("click", async () => {
 
 function connectSSE() {
   let es;
-  try { es = new EventSource("/api/events"); } catch (e) { return; }
+  try { es = new EventSource(stationUrl("/api/events")); } catch (e) { return; }
   es.addEventListener("hello", ev => {
     const d = JSON.parse(ev.data);
     state.cursorMs = Math.max(state.cursorMs, d.server_ms);

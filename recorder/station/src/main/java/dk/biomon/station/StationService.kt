@@ -91,6 +91,11 @@ class StationService : Service(), HealthProvider {
         clipsDir = File(getExternalFilesDir(null), "clips").apply { mkdirs() }
         audioCapture = AudioCapture(this)
 
+        // Before the server can answer a single request: the dashboard is served from disk
+        // now, and a fresh install has an empty dashboard directory until the bundled
+        // assets are copied into it. Cheap (two small text files, skipped once present).
+        DashboardStore.seed(this)
+
         val stationInfo = Station(id = "balcony-5t", name = "Balcony",
             lat = 55.6478, lon = 12.5875)
         httpServer = HttpServer(8848, this, db, settingsStore, stationInfo, this)
@@ -391,6 +396,9 @@ class StationService : Service(), HealthProvider {
                 .put("version", BuildConfig.VERSION_NAME)
                 .put("commit", BuildConfig.GIT_SHA)
                 .put("built_at", BuildConfig.BUILT_AT))
+            // The dashboard updates independently of the APK now, so the build stamp alone
+            // no longer identifies the UI on screen. This is the other half of the answer.
+            .put("dashboard", DashboardStore.healthJson(this))
             .put("server_ms", System.currentTimeMillis())
             .put("listening", listening)
             .put("uptime_ms", System.currentTimeMillis() - serviceStartedAtMs)

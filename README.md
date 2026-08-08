@@ -77,6 +77,72 @@ actually keeps it alive.
 
 The dashboard is then at `http://<phone-ip>:8848`.
 
+## Releases, and the keystore that must not change
+
+`.github/workflows/release.yml` builds `:station` and attaches the APK to a GitHub Release.
+It runs on every merge to `main` (published as `build-<run number>`), on a `v*` tag push,
+and on manual dispatch. The phone installs a release by opening its page in the phone's own
+browser and tapping the file — there is no adb once the station is deployed.
+
+**Without the signing secrets below, a release is build verification only — it cannot be
+installed as an update.** Gradle's debug signing config reads `~/.android/debug.keystore`
+from the machine doing the building, and a CI runner has no such file, so one is generated
+with a random key for that run alone. An APK signed that way will not install over the
+build on the phone, and will not install over the previous CI build either; each run's key
+differs from every other. The workflow labels those APKs `debugkey` and leads the release
+body with the warning. Set the secrets to get releases that install over the top.
+
+**Read this before setting the secrets.** Android will not install an APK over one signed
+with a different key. The only way through is an uninstall, and uninstalling deletes
+`station.db` **and** the two BirdNET models in `getExternalFilesDir("models")` — ~67 MB
+that are gitignored and restorable only over adb from a computer, which is precisely what
+this release flow exists to avoid needing.
+
+So: the keystore to upload is **the existing `~/.android/debug.keystore` from the machine
+that originally built and installed the app** (password `android`, alias
+`androiddebugkey`, key password `android`). That is the key the phone already trusts, and
+supplying that exact file means every future release installs straight over the current
+build with no uninstall and no data loss. Generating a *new* keystore instead works, but
+costs exactly one wipe — the first release signed with it cannot install over what is on
+the phone.
+
+```bash
+base64 -w0 ~/.android/debug.keystore    # the value for STATION_KEYSTORE_BASE64
+```
+
+| repo secret | value |
+|---|---|
+| `STATION_KEYSTORE_BASE64` | the base64 above |
+| `STATION_KEYSTORE_PASSWORD` | `android` for the debug keystore |
+| `STATION_KEY_ALIAS` | `androiddebugkey` for the debug keystore |
+| `STATION_KEY_PASSWORD` | `android` for the debug keystore |
+
+**With no secrets set the workflow still completes** — `build.gradle.kts` falls back to the
+debug signing config so the build produces a real APK rather than an unsigned one that
+cannot be installed even once. But as above, that APK is signed with a key the runner made
+up for that run: it proves the code compiles and is **not** installable over anything. Do
+not hand a `debugkey` release to the phone expecting an update.
+
+The APK's filename and the release body both name the key that was used (`debugkey` or
+`releasekey`), because whether an install succeeds or costs a wipe depends entirely on it
+and should not require inspecting the file to find out.
+
+`versionCode` comes from the CI run number (`STATION_VERSION_CODE`), defaulting to `1`
+locally. Sideloading an update requires it to increase.
+
+## Updating the dashboard without reinstalling
+
+The dashboard's `index.html` and `tokens.css` are served from
+`Android/data/dk.biomon.station/files/dashboard/`, not from inside the APK — the app
+copies the bundled versions there on first run. **Settings → Update dashboard** makes the
+station fetch both files from `main` on GitHub and replace them, then reloads the page.
+
+The source URL is fixed when the APK is built and cannot be set from the request; to point
+a station at a fork, rebuild it. If the fetch fails, nothing is overwritten and the button
+reports what actually went wrong (no network, an HTTP status, or a body that was not the
+dashboard) rather than "failed". The header shows the dashboard's own last-updated stamp
+beside the build commit, since after this the two can differ.
+
 ## Regenerating the species table
 
 `recorder/station/src/main/assets/station_species.json` maps BirdNET's 6,522 output

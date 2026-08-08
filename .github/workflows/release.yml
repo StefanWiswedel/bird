@@ -1,0 +1,201 @@
+# Builds the station APK and attaches it to a GitHub Release.
+#
+# WHY THIS EXISTS: the station phone is bolted outside and has no adb, no USB and no
+# inbound route. The only way to install a new build is to open a release page in the
+# phone's own browser and tap the APK.
+#
+# WHETHER THAT INSTALL WORKS DEPENDS ENTIRELY ON THE SIGNING KEY, and only a release
+# signed with STATION_KEYSTORE_BASE64 is installable as an update at all. Without that
+# secret the build falls back to Gradle's debug signing config, which on a CI runner
+# means an EPHEMERAL, RANDOMLY GENERATED key — there is no ~/.android/debug.keystore on
+# a fresh runner, so AGP creates one, and it is different from the developer machine's
+# and different again on the next run. Such an APK verifies that the code compiles and
+# nothing more. The release body says so, in those words, at the top.
+name: Release station APK
+
+on:
+  push:
+    # Every merge to main publishes a build-<run> release, so the phone always has a
+    # current APK to install without anyone remembering to cut a tag.
+    branches: [main]
+    # Real versions keep their own tag and their own release.
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release under (e.g. v0.1.3). Defaults to build-<run number>."
+        required: false
+
+permissions:
+  contents: write        # creating the release and uploading the APK
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # FULL HISTORY, NOT A SHALLOW CLONE. build.gradle.kts resolves the build stamp
+          # by shelling out to `git rev-parse --short=8 HEAD` and `git status --porcelain`
+          # at configuration time; with the default fetch-depth those fail soft and every
+          # release ships stamped "nogit", which defeats the whole point of the stamp
+          # (§11k — versionName cannot tell two builds apart, the commit can).
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"          # the toolchain the module is pinned to
+          cache: gradle
+
+      # The runner image ships the Android SDK; nothing to install.
+
+      - name: Decode the signing keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.STATION_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::No STATION_KEYSTORE_BASE64 secret set. The APK will be signed"\
+                 "with an ephemeral debug key generated on this runner and will NOT install"\
+                 "over any existing build. Build verification only — see README.md 'Releases'."
+            exit 0
+          fi
+          # OUTSIDE THE REPO TREE, deliberately: *.keystore is gitignored and must stay
+          # both untracked and untrackable. $RUNNER_TEMP is wiped when the job ends.
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/station.keystore"
+          echo "path=$RUNNER_TEMP/station.keystore" >> "$GITHUB_OUTPUT"
+
+      - name: Build release APK
+        working-directory: recorder
+        env:
+          # Absent secrets leave these empty and build.gradle.kts falls back to the debug
+          # signing config. That fallback exists so the build still PRODUCES something —
+          # an unsigned APK cannot even be installed once — not because the result is
+          # updatable. On a runner the debug key is generated on the spot and is unique to
+          # this run, so a debugkey release is build verification, nothing more.
+          STATION_KEYSTORE: ${{ steps.keystore.outputs.path }}
+          STATION_KEYSTORE_PASSWORD: ${{ secrets.STATION_KEYSTORE_PASSWORD }}
+          STATION_KEY_ALIAS: ${{ secrets.STATION_KEY_ALIAS }}
+          STATION_KEY_PASSWORD: ${{ secrets.STATION_KEY_PASSWORD }}
+          # Monotonic across releases so a sideloaded update installs over the previous
+          # one instead of being refused as a downgrade.
+          STATION_VERSION_CODE: ${{ github.run_number }}
+        # chmod as well as the mode committed in git: the wrapper was authored on Windows,
+        # where the executable bit is not preserved, and a checkout that loses it fails
+        # here with a bare "Permission denied".
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon :station:assembleRelease
+
+      - name: Name the artifact after the key that signed it
+        id: apk
+        env:
+          # Non-empty exactly when the keystore secret was set and decoded.
+          KEYSTORE_PATH: ${{ steps.keystore.outputs.path }}
+        run: |
+          set -eu
+          # Gradle wrote this while configuring, and it is the authority on which signing
+          # config was actually used — the workflow does not re-derive it, because a second
+          # copy of that decision is free to disagree with the first.
+          #
+          # But it must not COST the build. A missing file here would abort a job whose
+          # compile already succeeded, throwing away the APK over a label. So fall back to
+          # the only other evidence available — whether the keystore secret was set, which
+          # is the same input Gradle branched on — and warn loudly instead of aborting.
+          LABEL_FILE=recorder/station/build/signing-key.txt
+          KEY=""
+          # An `if`, not `[ -f … ] && …`: under `set -e` a failing AND-list at the end of
+          # a line exits the shell, which would reintroduce the very abort this avoids.
+          if [ -f "$LABEL_FILE" ]; then
+            KEY="$(tr -d '[:space:]' < "$LABEL_FILE" || true)"
+          fi
+          if [ -z "$KEY" ]; then
+            if [ -n "${KEYSTORE_PATH:-}" ]; then KEY="releasekey"; else KEY="debugkey"; fi
+            echo "::warning::$LABEL_FILE missing or empty; labelling this APK '$KEY',"\
+                 "derived from whether the keystore secret was set. Verify with apksigner"\
+                 "before installing over an existing build."
+          fi
+
+          SRC="$(find recorder/station/build/outputs/apk/release -name '*.apk' | head -n1)"
+          if [ -z "$SRC" ]; then
+            echo "assembleRelease produced no APK — refusing to publish an empty release." >&2
+            exit 1
+          fi
+
+          # A tag push names itself. Everything else — a merge to main, a dispatch with no
+          # input — gets a run-numbered build tag, so neither can silently overwrite a
+          # version release.
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            case "$GITHUB_REF" in
+              refs/tags/*) TAG="$GITHUB_REF_NAME" ;;
+              *)           TAG="build-${GITHUB_RUN_NUMBER}" ;;
+            esac
+          fi
+
+          NAME="station-${TAG}-${KEY}.apk"
+          mkdir -p dist && cp "$SRC" "dist/$NAME"
+          {
+            echo "key=$KEY"
+            echo "tag=$TAG"
+            echo "name=$NAME"
+            echo "path=dist/$NAME"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.name }}
+          path: ${{ steps.apk.outputs.path }}
+
+      - name: Release notes
+        run: |
+          set -eu
+          KEY="${{ steps.apk.outputs.key }}"
+          {
+            # The install verdict LEADS. Whether this file is usable at all is the first
+            # thing a reader needs, and for a debugkey build the answer is no.
+            if [ "$KEY" = "debugkey" ]; then
+              echo "> ### ⚠️ Not installable as an update — build verification only"
+              echo "> No signing keystore was configured, so this APK is signed with a"
+              echo "> **debug key generated on the CI runner for this run alone**. A fresh"
+              echo "> runner has no \`~/.android/debug.keystore\`, so Gradle creates one, and"
+              echo "> it differs from the key on your development machine and from the key"
+              echo "> used by every other run."
+              echo ">"
+              echo "> It will **not** install over the build currently on the phone, and"
+              echo "> **not** over the previous CI build either. Installing it requires"
+              echo "> uninstalling the station first, which deletes \`station.db\` and the"
+              echo "> ~67 MB of BirdNET models."
+              echo ">"
+              echo "> Set the \`STATION_KEYSTORE_BASE64\` secret (README → *Releases*) to get"
+              echo "> releases that install over the top."
+            else
+              echo "> ### Installable update"
+              echo "> Signed with the configured release keystore. It installs over any"
+              echo "> build signed with that same keystore, with no uninstall and no data"
+              echo "> loss. It will **not** install over a debug-signed build."
+            fi
+            echo
+            echo "Station APK for \`${{ steps.apk.outputs.tag }}\`."
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| commit | \`${GITHUB_SHA}\` |"
+            echo "| versionCode | \`${GITHUB_RUN_NUMBER}\` |"
+            echo "| signed with | **${KEY}** |"
+            echo
+            echo "Android refuses to install an APK over one signed with a different key, and"
+            echo "the only way through is an uninstall — which takes \`station.db\` and the"
+            echo "models with it. Check the key above before installing anything."
+            echo
+            echo "Install by opening this page in the phone's browser and tapping the APK."
+            echo "The dashboard updates separately — Settings → Update dashboard."
+          } > notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.apk.outputs.tag }}
+          name: Station ${{ steps.apk.outputs.tag }} (${{ steps.apk.outputs.key }})
+          body_path: notes.md
+          files: ${{ steps.apk.outputs.path }}
