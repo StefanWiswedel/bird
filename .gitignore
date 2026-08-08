@@ -1,53 +1,34 @@
-# --- raw captures & derived media (large, not source) ---
-data/**/*.mp4
-data/**/*.jpg
+# --- captured media (large, not source) ---
+# Detection clips and any pulled audio. The station keeps its own audio on the phone
+# under an 8 GB cap; nothing binary from a capture belongs in git.
 data/**/*.wav
 data/**/*.flac
-data/**/*.WAV
-analysis/audio/
-analysis/clips*/
-analysis/crops/
-analysis/clsf*/
-analysis/stridulation/
-analysis/testclips/
-analysis/verify_media/
-analysis/*/crops/
-analysis/results.db
-analysis/perch_classes.json
-analysis/model/*.onnx
+data/**/*.mp4
+data/**/*.jpg
 
-# --- python envs / caches ---
-analysis/.venv*/
-__pycache__/
-*.pyc
+# --- models ---
+# BirdNET's acoustic model (52 MB) and location/week meta-model (15 MB) are pushed to the
+# device with adb, never bundled or committed. See recorder/station/README or DESIGN §11.
+*.tflite
 
 # --- android ---
 recorder/.gradle/
 recorder/build/
-recorder/app/build/
 recorder/station/build/
 recorder/local.properties
 *.apk
 *.keystore
 !recorder/gradle/wrapper/gradle-wrapper.jar
 
+# --- python ---
+.venv*/
+__pycache__/
+*.pyc
+
+# --- local agent settings (machine-specific paths; never publish) ---
+.claude/settings.local.json
+
 # --- os ---
 Thumbs.db
 desktop.ini
-
-# db backups (derived)
-analysis/*.db.bak
-analysis/*.db.*bak
 *.bak
-analysis/*_run.log
-data/**/report.html
-analysis/rerun_*.log
-analysis/*_video2.log
-analysis/*_audio.log
-analysis/gbif_month_cache.json
-analysis/season_build.log
-analysis/consensus_*.json
-analysis/*_perch.log
-analysis/*_birdnet.log
-analysis/REC_*_bird_*.csv
-data/300726_stub/
