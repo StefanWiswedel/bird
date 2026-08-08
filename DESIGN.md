@@ -982,6 +982,31 @@ its own measurement.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-08-08) **The dashboard is served from storage and updates itself; the APK gets a
+  release pipeline** (§11l). Two problems with the same root: the station phone is going
+  outside permanently, and nothing in the cloud can reach it — it sits behind NAT on a home
+  LAN, so it must *pull* every change and can never be pushed to. Serving `www/index.html`
+  out of the APK meant a one-line UI edit cost a rebuild and a physical reinstall, so the
+  dashboard now lives in `getExternalFilesDir("dashboard")` alongside `models` and `clips`,
+  seeded from the bundled assets on first run and replaceable by `POST
+  /api/dashboard/update`, which fetches both files from a **compile-time-pinned**
+  `raw.githubusercontent.com` URL. Pinned rather than parameterised because that *is* the
+  security model for an unauthenticated endpoint on a LAN whose API already accepts an
+  unauthenticated `DELETE /api/data`: with no URL parameter, the worst a hostile device can
+  do is make the station re-download our own dashboard. Both files are downloaded whole,
+  validated (non-empty, correct length, and containing markup the real file always has —
+  the check that rejects a 404 page arriving with a plausible status) and staged before
+  either is renamed into place; any failure writes nothing and reports *which* failure it
+  was, per §2d. Serving falls back to the bundled asset whenever the stored file is
+  missing, so a botched update cannot leave a phone with no adb and no dashboard.
+  Separately, `.github/workflows/release.yml` now builds `:station` and attaches the APK to
+  a release, because the install path is now "open the release page in the phone's browser
+  and tap the file". Its `signingConfig` **falls back to the debug key** when no keystore
+  secret is set, and the APK's filename and the release body both name the key that signed
+  it: an APK signed with a different key than the one on the phone cannot install over the
+  top, and the only remedy is an uninstall, which deletes `station.db` and the ~67 MB of
+  BirdNET models — restorable only over adb from a computer, which is the exact thing this
+  whole change exists to stop needing.
 - (2026-08-03) **§11 written: the bird station's full architecture documented.** The
   station (`recorder/station`, built 2026-08-02 onward) had been accumulating design
   decisions and measurements in this changelog and in §8 without a home describing the
@@ -1839,6 +1864,87 @@ hand-written `ServerSocket` implementation (one thread per connection — adequa
 LAN appliance serving a handful of concurrent viewers plus long-lived SSE subscribers")
 rather than a pulled-in NanoHTTPD or Ktor. A dependency that won't resolve offline is a
 build that fails on the day the wifi is down.
+
+### 11l. The dashboard is a file on the phone, and it updates itself
+
+The station is bolted outside and is meant to be touched as rarely as possible. Everything
+after deployment happens either from a personal phone on the same wifi or from a machine
+that has never seen the station — and **nothing outside the LAN can reach it**, because it
+is behind NAT. That single constraint decides the shape of everything below: the station
+**pulls**, it is never pushed to, and no part of this may assume adb, USB or a laptop.
+
+**Where the dashboard lives.** `index.html` and `tokens.css` are served from
+`getExternalFilesDir("dashboard")` — the same pattern as `models`, `clips` and
+`species_photos` — not from the APK's `assets`. Serving them from the APK meant the
+dashboard's iteration speed was pinned to the APK's: a one-line CSS change cost a rebuild
+and a physical reinstall of the whole application. The assets stay in the APK as the
+**first-run seed** (copied into place at service start, before the HTTP server can answer
+anything) and as the **recovery path**: `DashboardStore.read` falls back to the bundled
+asset whenever the stored file is missing or unreadable, so the worst case is serving the
+UI that shipped with the build, never serving nothing. On a phone with no adb, "no
+dashboard" is unrecoverable, and that is the failure the fallback exists to make
+impossible.
+
+**`POST /api/dashboard/update`.** Fetches both files over HTTPS from
+`raw.githubusercontent.com` and replaces the stored copies. Four decisions in it are
+load-bearing:
+
+- **The source URL is a `buildConfigField`, not a parameter.** This is the whole security
+  model. The endpoint is unauthenticated, matching the rest of the API — `/api/data`
+  already accepts an unauthenticated `DELETE` that wipes every detection and clip, so the
+  threat model is already "a trusted LAN", and a token guarding the stylesheet beside an
+  open endpoint that destroys the data would be theatre. Because the URL is pinned, the
+  worst a hostile device on the network can do is make the station re-download our own
+  dashboard from our own repository. A URL parameter "for flexibility" would convert that
+  into arbitrary script execution in the browser of whoever opens the dashboard next, and
+  *that* would need a token. Point it at a fork by rebuilding.
+- **Download everything, then write.** Both files land in memory, are validated, are
+  staged as `.part` files, and only then get renamed over the live ones. Streaming
+  straight to `index.html` means a dropped wifi association halfway through leaves the
+  station serving half a document. Staging both before renaming either also prevents the
+  narrower version of the same failure — a new `index.html` beside the old `tokens.css`.
+- **Validation is what distinguishes "downloaded the dashboard" from "downloaded
+  something".** Non-empty; length matching the declared `Content-Length` (a short read is
+  not an exception, it is a silent truncation); and containing a marker the real file
+  always has — `id="panel-live"`, `:root`. Status codes alone are not enough: a GitHub 404
+  body, a CDN error page and a captive-portal login page can all arrive looking fine to
+  code that only checks for 200.
+- **§2d, applied directly.** A network error, a non-200 and a failed validation are three
+  different sentences, reported as three different `error` values with a human-readable
+  `reason`, per file, and the response says plainly that nothing was overwritten. The
+  Settings button surfaces the reason verbatim; "update failed" would send someone to
+  debug the wrong thing, which is exactly the cost §2d was written down to stop paying.
+
+**Build identity now has two halves.** §11k's build stamp answered "is the phone running
+what I just built?" — but the dashboard now updates independently of the APK, so the
+commit no longer identifies the UI on screen. `/api/health` gained a `dashboard` block
+(`stored`, `updated_at_ms`, `source`) and the header shows the dashboard's own timestamp
+beside the commit, reading `ui bundled` when nothing has ever been pulled.
+
+**Releases** (`.github/workflows/release.yml`). The install path is now "open the release
+page in the phone's browser and tap the APK", so CI has to produce an APK that actually
+installs. Two things make that true, and both are about not destroying data. `versionCode`
+comes from the CI run number rather than being hardcoded to `1`, or every update after the
+first is refused as a downgrade. And the release build gets a `signingConfig` that **falls
+back to the debug key** when no keystore is configured: an unsigned APK does not install at
+all, and an APK signed with a *different* key than the one on the phone cannot install over
+the top — the only remedy is an uninstall, which deletes `station.db` and the two BirdNET
+models (~67 MB, gitignored, restorable only over adb from a computer). Which key signed a
+build therefore determines whether the next install is free or costs a wipe, so it is in
+the APK's filename and in the release body, and Gradle — not the workflow — decides it and
+writes it out, so there is only ever one copy of that decision. The keystore to upload as
+a secret is the **existing `~/.android/debug.keystore`** from the machine that first built
+the app; supplying a newly generated one instead would force exactly one wipe.
+
+**Cross-origin.** The dashboard resolves a configurable station base (`?station=`, then
+`localStorage`, then `""` for same-origin) and prefixes every request with it — including
+the spectrogram WebSocket, which used to derive its host from the serving origin, and the
+server-relative `clip.url` / `photo.url` the API returns, which the browser would otherwise
+resolve against whatever is serving the page. `writeCors` also had to learn `DELETE`, since
+`/api/data` is DELETE-only and cross-origin "Clear all" was dying at the preflight. With no
+`?station=` parameter the base is `""` and the on-phone dashboard behaves exactly as
+before; this exists so the UI can be iterated on from a laptop against a real station or
+the mock.
 
 ### 11n. Measured performance
 

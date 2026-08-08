@@ -89,6 +89,7 @@ this is a LAN appliance the user opens from whatever device is to hand.
 | method | path | purpose |
 |---|---|---|
 | GET | `/` | the dashboard (single self-contained page) |
+| POST | `/api/dashboard/update` | re-fetch the dashboard's files from the pinned source URL |
 | GET | `/api/health` | station status — see below |
 | GET | `/api/detections` | detection list, newest first |
 | GET | `/api/summary` | one day's rollup |
@@ -139,12 +140,21 @@ and a skewed client clock would silently skip or repeat detections.
   "storage": { "clips_bytes": 812334592, "cap_bytes": 10737418240, "free_bytes": 115964116992, "clips": 1412, "pruned_total": 0 },
   "queue": { "pending": 0, "publishers": ["local"] },
   "settings": { "display_threshold": 0.65, "retention_floor": 0.10, "repeat_required": 2,
-                "repeat_window_min": 30, "region_season_filter_enabled": true }
+                "repeat_window_min": 30, "region_season_filter_enabled": true },
+  "app": { "version": "0.1.0", "commit": "1a2b3c4d+", "built_at": "2026-08-08 14:02" },
+  "dashboard": { "stored": true, "updated_at_ms": 1785640470123,
+                 "source": "https://raw.githubusercontent.com/…/assets/www/" }
 }
 ```
 
 `thermal.throttled` is the station's own decision, not the OS's. It means inference has
 been slowed deliberately. The dashboard should say so plainly rather than hide it.
+
+`dashboard` describes the **files being served**, which since `POST /api/dashboard/update`
+are no longer necessarily the ones inside the APK. `stored` is `false` and
+`updated_at_ms` is `null` when the station is still serving the bundled copy — a fresh
+install that has never pulled. `app.commit` alone therefore no longer identifies what is
+on screen, and the dashboard shows both stamps side by side.
 
 ### `GET /api/summary?date=YYYY-MM-DD`
 
@@ -252,6 +262,84 @@ this clears what was *observed*, not how the station is configured. Irreversible
 ```json
 { "cleared": true }
 ```
+
+### `POST /api/dashboard/update`
+
+Makes the station fetch `index.html` and `tokens.css` over HTTPS and replace the copies in
+`getExternalFilesDir("dashboard")` — the Settings tab's "Update dashboard" action. No
+request body, and **no parameters at all**.
+
+**The source URL is a compile-time constant** (`BuildConfig.DASHBOARD_SOURCE_URL`) and is
+never taken from the request. That is deliberate and is the endpoint's entire security
+model: like `DELETE /api/data`, it is unauthenticated, because the API's threat model is a
+trusted LAN — and because the URL is pinned, the worst a hostile device on that LAN can
+achieve is making the station re-download the owner's own dashboard from the owner's own
+repository. Accepting a URL parameter would turn that into arbitrary script execution in
+the browser of whoever opens the dashboard next, which is why the parameter does not exist.
+
+**Both files are downloaded in full, validated, and only then written.** Nothing is
+streamed to a live file. If either fetch fails, *neither* file is written and the
+dashboard already on the phone keeps serving — a station that cannot be reached by adb
+must never be able to end up with a half-written UI. Validation rejects an empty body, a
+body shorter than its own `Content-Length`, and a body that does not contain the marker
+the real file always has (`id="panel-live"`, `:root`) — which is what catches a GitHub 404
+page or a captive-portal login page arriving with a plausible status.
+
+Success — `200`:
+
+```json
+{
+  "schema": 1,
+  "source": "https://raw.githubusercontent.com/…/assets/www/",
+  "checked_at_ms": 1785640470123,
+  "updated": true,
+  "updated_at_ms": 1785640470456,
+  "files": [
+    { "name": "index.html", "ok": true, "bytes": 133969, "written": true, "error": null, "reason": null },
+    { "name": "tokens.css", "ok": true, "bytes": 11615, "written": true, "error": null, "reason": null }
+  ]
+}
+```
+
+Failure — `502` when the fetch failed or returned something that is not the dashboard,
+`500` when the station could not write what it successfully downloaded. `updated` is
+`false`, every file still carries its own outcome, and `written` is `false` on all of them:
+
+```json
+{
+  "schema": 1,
+  "source": "https://raw.githubusercontent.com/…/assets/www/",
+  "checked_at_ms": 1785640470123,
+  "updated": false,
+  "error": "network",
+  "reason": "cannot resolve raw.githubusercontent.com — no DNS answer, so the station is probably off the network",
+  "files": [
+    { "name": "index.html", "ok": false, "bytes": 0, "written": false,
+      "error": "network", "reason": "cannot resolve raw.githubusercontent.com — …" },
+    { "name": "tokens.css", "ok": false, "bytes": 0, "written": false,
+      "error": "network", "reason": "cannot resolve raw.githubusercontent.com — …" }
+  ]
+}
+```
+
+`error` is one of:
+
+| value | meaning |
+|---|---|
+| `network` | DNS failure, no route, refused connection, or timeout — the station could not reach the host |
+| `tls` | the connection was made but TLS failed |
+| `http` | the host answered with a status other than 200; `reason` names it |
+| `truncated` | the body ended short of its declared `Content-Length` |
+| `validation` | the body was empty, or was not the file it claims to be |
+| `too_large` | the body exceeded the 4 MB ceiling; that is not a dashboard file |
+| `write` | both files downloaded intact but could not be written to storage |
+| `storage` | external storage is not mounted, so there is nowhere to write |
+
+**`reason` is a sentence, not a code.** DESIGN.md §2d: "the update failed" is
+indistinguishable from "there was nothing to update", and the three real causes here —
+the station is off the network, GitHub said no, what came back was not the dashboard —
+need three different responses from the person holding the phone. The dashboard surfaces
+`reason` verbatim and never substitutes a generic message.
 
 ---
 

@@ -304,8 +304,35 @@ class HttpServer(
         val p = req.path
         when {
             req.method == "OPTIONS" -> { writeStatus(out, 204); writeCors(out); out.write("Content-Length: 0\r\n\r\n".toByteArray()) }
-            p == "/" || p == "/index.html" -> serveAsset(out, "www/index.html", "text/html; charset=utf-8")
-            p == "/tokens.css" -> serveAsset(out, "www/tokens.css", "text/css; charset=utf-8")
+            // Served from getExternalFilesDir("dashboard"), not from the APK, so the UI can
+            // be updated without a reinstall (POST /api/dashboard/update below). The bundled
+            // asset remains the seed and the fallback — see DashboardStore.
+            p == "/" || p == "/index.html" -> serveDashboard(out, "index.html")
+            p == "/tokens.css" -> serveDashboard(out, "tokens.css")
+            // NO AUTH TOKEN, DELIBERATELY — do not "fix" this by adding one.
+            //
+            // Two reasons. First, the API's threat model already assumes a trusted LAN:
+            // /api/data accepts an unauthenticated DELETE that wipes every detection and
+            // clip on the station. A token guarding the dashboard's stylesheet, beside an
+            // open endpoint that destroys the data, would be theatre.
+            // Second, the source URL is a compile-time constant (BuildConfig.
+            // DASHBOARD_SOURCE_URL) and is NOT client-supplied, which IS the security
+            // model here: the worst a hostile device on the LAN can make this station do
+            // is re-download the station owner's own dashboard from the owner's own repo.
+            // Introducing a URL parameter "for flexibility" is what would actually need a
+            // token, so don't do that either.
+            p == "/api/dashboard/update" && req.method == "POST" -> {
+                val r = DashboardStore.update(ctx)
+                // §2d: a failure must not be reported through the success channel. The body
+                // says which file failed and why; the status code says "this did not work"
+                // to anything that only looks at status codes.
+                val code = when {
+                    r.optBoolean("updated") -> 200
+                    r.optString("error") in setOf("write", "storage") -> 500
+                    else -> 502     // the fetch from GitHub failed or returned junk
+                }
+                writeJson(out, code, r)
+            }
             p == "/api/health" -> writeJson(out, 200, health.health())
             p == "/api/settings" && req.method == "GET" -> writeJson(out, 200, settings.get().json())
             p == "/api/settings" && req.method == "POST" -> {
@@ -571,13 +598,17 @@ class HttpServer(
     // ------------------------------------------------------------------ response writers
 
     private fun writeStatus(out: OutputStream, code: Int) {
-        val msg = when (code) { 200 -> "OK"; 204 -> "No Content"; 206 -> "Partial Content"; 404 -> "Not Found"; 400 -> "Bad Request"; else -> "Error" }
+        val msg = when (code) { 200 -> "OK"; 204 -> "No Content"; 206 -> "Partial Content"; 400 -> "Bad Request"
+                                404 -> "Not Found"; 500 -> "Internal Server Error"; 502 -> "Bad Gateway"; else -> "Error" }
         out.write("HTTP/1.1 $code $msg\r\n".toByteArray())
     }
 
+    /** DELETE is in the list because /api/data is DELETE-only: without it a cross-origin
+     *  "Clear all" dies at the preflight, which looks exactly like a station that is not
+     *  responding rather than like a header that is missing one verb. */
     private fun writeCors(out: OutputStream) {
         out.write(("Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: content-type\r\n" +
-                  "Access-Control-Allow-Methods: GET,POST,OPTIONS\r\n").toByteArray())
+                  "Access-Control-Allow-Methods: GET,POST,DELETE,OPTIONS\r\n").toByteArray())
     }
 
     private fun writeJson(out: OutputStream, code: Int, body: JSONObject) {
@@ -588,9 +619,13 @@ class HttpServer(
         out.write(bytes)
     }
 
-    private fun serveAsset(out: OutputStream, assetPath: String, contentType: String) {
-        val bytes = try { ctx.assets.open(assetPath).use { it.readBytes() } } catch (e: Exception) {
-            writeJson(out, 404, JSONObject().put("error", "asset not found: $assetPath")); return
+    /** Stored file, else the bundled asset (DashboardStore.read). A 404 here means both are
+     *  gone, which on a phone with no adb would be terminal — so it says which file. */
+    private fun serveDashboard(out: OutputStream, name: String) {
+        val bytes = DashboardStore.read(ctx, name)
+        val contentType = DashboardStore.contentType(name)
+        if (bytes == null || contentType == null) {
+            writeJson(out, 404, JSONObject().put("error", "dashboard file unavailable: $name")); return
         }
         writeStatus(out, 200); writeCors(out)
         out.write(("Content-Type: $contentType\r\nCache-Control: no-store\r\nContent-Length: ${bytes.size}\r\n\r\n").toByteArray())

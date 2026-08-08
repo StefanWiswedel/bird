@@ -17,6 +17,8 @@ Runtime toggles (so one running server can be flipped while screenshotting):
     GET /mock/mode?weather=1|0      summary.weather present/null
     GET /mock/mode?sse=1|0          allow/deny SSE (0 forces the polling fallback)
     GET /mock/mode?live=<seconds>   how often a new live detection is produced
+    GET /mock/mode?dashboard=ok|network|http|validation|write
+                                    what POST /api/dashboard/update reports
     GET /mock/emit                  emit one live detection right now
 
 Deliberate deviation from the contract, for the mock only: /api/photo/{key}
@@ -126,7 +128,18 @@ MODE = {
     "weather": True,
     "sse": True,
     "live_interval": 14.0,
+    # POST /api/dashboard/update outcome. "ok" or one of the failure kinds the station
+    # can actually report; the failure UI has to be developable too, and it is the half
+    # that never gets exercised by accident.
+    "dashboard": "ok",
 }
+
+# When the mock last "updated" the dashboard, epoch ms, or None for "never pulled" —
+# the state a freshly installed station is in.
+DASHBOARD_UPDATED_MS = [None]
+
+DASHBOARD_SOURCE = ("https://raw.githubusercontent.com/StefanWiswedel/bird/main/"
+                    "recorder/station/src/main/assets/www/")
 
 LOCK = threading.RLock()
 ROWS = []           # newest last
@@ -402,7 +415,62 @@ def health_body():
                     "free_bytes": 115964116992, "clips": clips, "pruned_total": 0},
         "queue": {"pending": 0, "publishers": ["local"]},
         "settings": st,
+        "dashboard": {
+            "stored": DASHBOARD_UPDATED_MS[0] is not None,
+            "updated_at_ms": DASHBOARD_UPDATED_MS[0],
+            "source": DASHBOARD_SOURCE,
+        },
     }
+
+
+def dashboard_update_body():
+    """The POST /api/dashboard/update response, per API.md.
+
+    The mock never actually fetches anything — it reports the shapes, including the
+    failure shapes, which is what the dashboard has to render. Flip between them with
+    GET /mock/mode?dashboard=ok|network|http|validation|write.
+    """
+    kind = MODE["dashboard"]
+    files = ["index.html", "tokens.css"]
+    body = {"schema": SCHEMA, "source": DASHBOARD_SOURCE, "checked_at_ms": now_ms()}
+
+    if kind == "ok":
+        sizes = {}
+        for name in files:
+            f = WWW / name
+            sizes[name] = f.stat().st_size if f.exists() else 4096
+        DASHBOARD_UPDATED_MS[0] = now_ms()
+        body.update({
+            "updated": True,
+            "updated_at_ms": DASHBOARD_UPDATED_MS[0],
+            "files": [{"name": n, "ok": True, "bytes": sizes[n], "written": True,
+                       "error": None, "reason": None} for n in files],
+        })
+        return body, 200
+
+    # Failure: nothing is written, and the first file's failure is the reported cause —
+    # exactly as the station reports it. Note that both files still carry an outcome.
+    err, reason, code = {
+        "network": ("network",
+                    "cannot resolve raw.githubusercontent.com — no DNS answer, so the "
+                    "station is probably off the network", 502),
+        "http": ("http", "HTTP 404 from raw.githubusercontent.com for index.html", 502),
+        "validation": ("validation",
+                       'index.html does not look like the dashboard (no id="panel-live" '
+                       "in 14 bytes) — an error page, not the file", 502),
+        "write": ("write", "downloaded 131072 bytes but could not write them: ENOSPC", 500),
+    }.get(kind, ("network", "mock failure", 502))
+
+    body.update({
+        "updated": False, "error": err, "reason": reason,
+        "files": [
+            {"name": files[0], "ok": False, "bytes": 0, "written": False,
+             "error": err, "reason": reason},
+            {"name": files[1], "ok": True, "bytes": 7000, "written": False,
+             "error": None, "reason": None},
+        ],
+    })
+    return body, code
 
 
 def summary_body(datestr):
@@ -536,7 +604,9 @@ class Handler(BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "content-type")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        # DELETE is here because /api/data is DELETE-only: without it a cross-origin
+        # "Clear all" dies at the preflight, which looks like an unreachable station.
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
 
     def _json(self, obj, code=200):
         body = json.dumps(obj).encode("utf-8")
@@ -584,6 +654,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+        if path == "/api/dashboard/update":
+            body, code = dashboard_update_body()
+            return self._json(body, code)
 
         if path == "/api/settings":
             n = int(self.headers.get("Content-Length") or 0)
@@ -635,6 +709,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "index.html not built yet at %s" % f}, 404)
             return self._bytes(f.read_bytes(), "text/html; charset=utf-8", cacheable=False)
 
+        # The station serves this too. Without it the mock renders the dashboard with no
+        # tokens at all, and every review against the mock is of the wrong thing.
+        if path == "/tokens.css":
+            f = WWW / "tokens.css"
+            if not f.exists():
+                return self._json({"error": "tokens.css missing at %s" % f}, 404)
+            return self._bytes(f.read_bytes(), "text/css; charset=utf-8", cacheable=False)
+
         if path == "/api/health":
             return self._json(health_body())
 
@@ -684,6 +766,8 @@ class Handler(BaseHTTPRequestHandler):
                     MODE[k] = q[k][0] not in ("0", "false", "no")
             if "live" in q:
                 MODE["live_interval"] = float(q["live"][0])
+            if "dashboard" in q:
+                MODE["dashboard"] = q["dashboard"][0]
             return self._json(dict(MODE))
 
         if path == "/mock/emit":

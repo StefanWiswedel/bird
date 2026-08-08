@@ -77,6 +77,59 @@ actually keeps it alive.
 
 The dashboard is then at `http://<phone-ip>:8848`.
 
+## Releases, and the keystore that must not change
+
+`.github/workflows/release.yml` builds `:station` and attaches the APK to a GitHub Release
+on a tag push (`v*`) or a manual run. The phone installs it by opening the release page in
+its own browser and tapping the file — there is no adb once the station is deployed.
+
+**Read this before setting the secrets.** Android will not install an APK over one signed
+with a different key. The only way through is an uninstall, and uninstalling deletes
+`station.db` **and** the two BirdNET models in `getExternalFilesDir("models")` — ~67 MB
+that are gitignored and restorable only over adb from a computer, which is precisely what
+this release flow exists to avoid needing.
+
+So: the keystore to upload is **the existing `~/.android/debug.keystore` from the machine
+that originally built and installed the app** (password `android`, alias
+`androiddebugkey`, key password `android`). That is the key the phone already trusts, and
+supplying that exact file means every future release installs straight over the current
+build with no uninstall and no data loss. Generating a *new* keystore instead works, but
+costs exactly one wipe — the first release signed with it cannot install over what is on
+the phone.
+
+```bash
+base64 -w0 ~/.android/debug.keystore    # the value for STATION_KEYSTORE_BASE64
+```
+
+| repo secret | value |
+|---|---|
+| `STATION_KEYSTORE_BASE64` | the base64 above |
+| `STATION_KEYSTORE_PASSWORD` | `android` for the debug keystore |
+| `STATION_KEY_ALIAS` | `androiddebugkey` for the debug keystore |
+| `STATION_KEY_PASSWORD` | `android` for the debug keystore |
+
+**With no secrets set the workflow still works**: `build.gradle.kts` falls back to the
+debug signing config, which is a valid, installable APK — an unsigned one would not
+install at all. The APK's filename and the release body both say which key was used
+(`debugkey` or `releasekey`), because whether the next install succeeds depends entirely
+on that and it should not require inspecting the file to find out.
+
+`versionCode` comes from the CI run number (`STATION_VERSION_CODE`), defaulting to `1`
+locally. Sideloading an update requires it to increase.
+
+## Updating the dashboard without reinstalling
+
+The dashboard's `index.html` and `tokens.css` are served from
+`Android/data/dk.biomon.station/files/dashboard/`, not from inside the APK — the app
+copies the bundled versions there on first run. **Settings → Update dashboard** makes the
+station fetch both files from `main` on GitHub and replace them, then reloads the page.
+
+The source URL is fixed when the APK is built and cannot be set from the request; to point
+a station at a fork, rebuild it. If the fetch fails, nothing is overwritten and the button
+reports what actually went wrong (no network, an HTTP status, or a body that was not the
+dashboard) rather than "failed". The header shows the dashboard's own last-updated stamp
+beside the build commit, since after this the two can differ.
+
 ## Regenerating the species table
 
 `recorder/station/src/main/assets/station_species.json` maps BirdNET's 6,522 output
