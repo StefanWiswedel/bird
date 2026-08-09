@@ -487,6 +487,18 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
          *  than once", which is the condition under which agreeing in bulk is honest. */
         const val BULK_MIN_CONFIRMED = 2
 
+        /** Verdicts needed on EACH side before a species counts as calibrated. Three is not
+         *  a statistical bar; it is "there is evidence above and below the line, more than
+         *  once". For a species heard twice a week that is still months away, which is
+         *  exactly why the UI has to distinguish calibrated species from uncalibrated ones
+         *  rather than letting an exemption look like a tuned threshold. */
+        const val CALIBRATION_MIN = 3
+
+        /** Fraction of otherwise-exempt bouts still put in front of a human, to catch drift
+         *  as noise sources change and the microphone ages. Deterministic per bout (see
+         *  auditSampled) so it cannot be re-rolled by refreshing. */
+        const val AUDIT_EVERY = 10
+
         /** BirdNET's 11 acoustic-context classes — build_station_species.py's
          *  NON_TAXON_LABELS, by taxon_key (its slug() function). Every query over
          *  `detections` excludes these by key, not by the stored taxon_group column: a
@@ -530,9 +542,16 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
          */
         fun effectiveThreshold(
             taxonKey: String, regional: Boolean, inSeason: Boolean,
-            settings: Settings, overrides: Map<String, Float>, prior: Double? = null
+            settings: Settings, overrides: Map<String, Float>, prior: Double? = null,
+            learned: Map<String, Float> = emptyMap()
         ): Float {
             overrides[taxonKey]?.let { return it }
+            // A threshold LEARNED from this station's own verdicts replaces the global
+            // default outright, exactly as a manual override does, and for the same reason:
+            // once there is a measured number for this species here, it is authoritative
+            // over a heuristic built from a checklist and a national occurrence prior.
+            // Ranked below a manual override — a human's explicit answer still wins.
+            learned[taxonKey]?.let { return it.coerceIn(0f, MAX_EFFECTIVE_THRESHOLD) }
             var t = settings.displayThreshold
             if (settings.regionSeasonFilterEnabled) {
                 if (prior != null) {
@@ -611,6 +630,7 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         val windowMs = settings.repeatWindowMin * 60_000L
         val gapMs = settings.boutGapSeconds * 1000L
         val overrides = speciesThresholdOverrides()
+        val learned = learnedThresholds()
         val priorCache = HashMap<Int, Map<String, Double>>()
         return rows.map { r ->
             // Timestamps rather than COUNT(*): the count is what was wrong. Bouts have to be
@@ -627,7 +647,8 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             // same reason: re-judging a March record against August's expectations is a lie
             // about what was plausible at the time.
             val prior = priorCache.getOrPut(weekOf(r.detectedAtMs)) { priorsForWeek(weekOf(r.detectedAtMs)) }[r.taxon.scientific]
-            val threshold = effectiveThreshold(r.taxon.key, r.taxonRegional, r.taxonInSeason, settings, overrides, prior)
+            val threshold = effectiveThreshold(r.taxon.key, r.taxonRegional, r.taxonInSeason,
+                settings, overrides, prior, learned)
             val confirmed = r.confidence >= threshold && bouts >= settings.repeatRequired
             // repeat_count now reports BOUTS, not raw rows. The API field keeps its name
             // because its MEANING is unchanged - "how many times did I hear this" - and it
@@ -675,7 +696,8 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
      * used by the count, the day list and the verification flow alike.
      */
     private fun boutsOf(rows: List<DetectionRow>, settings: Settings,
-                        overrides: Map<String, Float>, prior: Double?, nowMs: Long): List<Bout> {
+                        overrides: Map<String, Float>, prior: Double?, nowMs: Long,
+                        learned: Map<String, Float> = emptyMap()): List<Bout> {
         if (rows.isEmpty()) return emptyList()
         val gapMs = settings.boutGapSeconds * 1000L
         val sorted = rows.sortedBy { it.detectedAtMs }
@@ -689,7 +711,8 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         return groups.map { g ->
             val first = g.first()
             val threshold = effectiveThreshold(
-                first.taxon.key, first.taxonRegional, first.taxonInSeason, settings, overrides, prior)
+                first.taxon.key, first.taxonRegional, first.taxonInSeason, settings, overrides,
+                prior, learned)
             val peak = g.maxOf { it.confidence }
 
             // One entry per distinct FILE, in playback order. Several rows share a clip, and
@@ -740,7 +763,8 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         val rows = rowsForDay(date, settings).filter { it.taxon.key == taxonKey }
         if (rows.isEmpty()) return emptyList()
         val prior = priorsForWeek(weekOf(rows.first().detectedAtMs))[rows.first().taxon.scientific]
-        return boutsOf(rows, settings, speciesThresholdOverrides(), prior, System.currentTimeMillis())
+        return boutsOf(rows, settings, speciesThresholdOverrides(), prior,
+            System.currentTimeMillis(), learnedThresholds())
     }
 
     /** Raw rows for a local date, retention floor and non-taxon exclusions applied. */
@@ -766,6 +790,7 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         val rows = rowsForDay(date, settings)
         if (rows.isEmpty()) return emptyList()
         val overrides = speciesThresholdOverrides()
+        val learned = learnedThresholds()
         val rejected = rejectedSpecies()
         val confirmedSp = lifeList().filter { it.status == "confirmed" }.map { it.scientific }.toHashSet()
         val solar = Solar.forDate(date, lat, lon)
@@ -777,7 +802,7 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             val prior = priorCache.getOrPut(weekOf(g.first().detectedAtMs)) {
                 priorsForWeek(weekOf(g.first().detectedAtMs))
             }[taxon.scientific]
-            val bouts = boutsOf(g, settings, overrides, prior, now)
+            val bouts = boutsOf(g, settings, overrides, prior, now, learned)
             val activity = IntArray(6)
             for (b in bouts) activity[Solar.binOf(solar, b.startMs)]++
             // "Best" means the loudest evidence that can actually be listened to. A bout
@@ -811,6 +836,11 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
     data class TriageSpecies(
         val taxon: Taxon, val tier: String,
         val boutsTotal: Int, val boutsDone: Int, val boutsPending: Int,
+        /** Undecided bouts the station is NOT asking about, because this species has a
+         *  learned threshold and they cleared it. Reported rather than silently dropped:
+         *  an exemption a person cannot see is indistinguishable from a bug. */
+        val boutsExempt: Int,
+        val calibration: Calibration?,
         val peakConfidence: Float, val threshold: Float,
         val prior: Double?, val wouldBeLifer: Boolean,
         val stake: String, val stakeReason: String,
@@ -828,8 +858,8 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         val rows = c.use { readRows(it) }
         if (rows.isEmpty()) return emptyList()
         val prior = priorsForWeek(weekOf(rows.first().detectedAtMs))[rows.first().taxon.scientific]
-        return boutsOf(rows, settings, speciesThresholdOverrides(), prior, System.currentTimeMillis())
-            .take(limit)
+        return boutsOf(rows, settings, speciesThresholdOverrides(), prior,
+            System.currentTimeMillis(), learnedThresholds()).take(limit)
     }
 
     /**
@@ -842,6 +872,10 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
      */
     fun triageSpecies(settings: Settings, lat: Double, lon: Double, limit: Int = 60): List<TriageSpecies> {
         val overrides = speciesThresholdOverrides()
+        // One calibration pass for the whole list; boutsForSpecies is handed the result so
+        // it does not redo it per species.
+        val cals = calibrations()
+        val learned = learnedThresholds(cals)
         val statuses = lifeList().associateBy { it.scientific }
         val solarCache = HashMap<String, Solar.Day>()
         val priorCache = HashMap<Int, Map<String, Double>>()
@@ -858,10 +892,8 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
 
         val out = ArrayList<TriageSpecies>()
         for (key in keys) {
-            val bouts = boutsForSpecies(key, settings)
+            val bouts = boutsForSpecies(key, settings, learned = learned)
             if (bouts.isEmpty()) continue
-            val pending = bouts.count { it.verifyState != "done" }
-            if (pending == 0) continue
             val taxon = bouts.first().taxon
             val status = statuses[taxon.scientific]
             val tier = lifeTier(status?.status)
@@ -872,6 +904,15 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             val peak = bouts.maxOf { it.peakConfidence }
             val threshold = bouts.first().threshold
             val wouldBeLifer = status?.firstConfirmedAt == null
+
+            // EXEMPTION. A bout above a learned threshold for a plausible, already-listed
+            // species does not need a human — except for the audit sample. Anything still
+            // required counts as pending, so the number on the row is the work remaining
+            // rather than the number of undecided rows in the table.
+            val pending = bouts.count { verifyNeed(it, learned[key], prior, wouldBeLifer, settings).required }
+            val done = bouts.count { it.verifyState == "done" }
+            val exempt = bouts.size - done - pending
+            if (pending == 0) continue
 
             // The order the spec calls for, in the order it calls for it.
             // Implausible here and now: a local-occurrence prior far below what the
@@ -893,7 +934,9 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             }
             out += TriageSpecies(
                 taxon = taxon, tier = tier,
-                boutsTotal = bouts.size, boutsDone = bouts.size - pending, boutsPending = pending,
+                boutsTotal = bouts.size, boutsDone = done,
+                boutsPending = pending, boutsExempt = exempt,
+                calibration = cals[key],
                 peakConfidence = peak, threshold = threshold,
                 prior = prior, wouldBeLifer = wouldBeLifer,
                 stake = stake, stakeReason = reason,
@@ -937,6 +980,170 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         } finally { db.endTransaction() }
         return dest.length()
     }
+
+    /**
+     * What verification has taught us about one species at this site.
+     *
+     * [threshold] is null until there is evidence on BOTH sides. A boundary needs examples
+     * above and below it; a species with ten confirmations and no rejections tells you
+     * nothing about where the line is, only that the line is somewhere below the lowest
+     * confirmation.
+     */
+    data class Calibration(
+        val taxonKey: String, val scientific: String,
+        val positives: Int, val negatives: Int,
+        val threshold: Float?, val calibrated: Boolean,
+        val lowestConfirmed: Float?, val highestRejected: Float?
+    )
+
+    /**
+     * Learn a per-species threshold from verdicts.
+     *
+     * NO GLOBAL "TRUST ABOVE X", and this is why: the committed known-negative corpus
+     * peaks at 0.98 and is entirely false positives. BirdNET scores are not calibrated
+     * probabilities and vary by species, site and noise, so a number that means "certain"
+     * for a Blackbird on this balcony can be routine noise for a Shelduck. The only
+     * defensible threshold is one measured per species, here.
+     *
+     * REJECTIONS CARRY MORE INFORMATION THAN CONFIRMATIONS. A confirmation says "the line
+     * is somewhere below this"; a rejection says "the line is somewhere above this", and
+     * it is rejections that pin the boundary from underneath. So the rule below prefers
+     * the most conservative line that admits no known false positive, and only falls back
+     * to an error-minimising split when the two classes overlap.
+     */
+    /**
+     * Every species' calibration, from ONE query.
+     *
+     * Per-species queries were the obvious shape and the wrong one: this is read on every
+     * detections request, and the triage list asks about every species in turn, so a query
+     * per species is O(N) per read and O(N²) across the list — on a phone already spending
+     * ~190 ms of every 1.5 s hop inside BirdNET. The whole verdict set is small (it is
+     * bounded by how much a human has listened to), so it is read once and grouped in
+     * memory.
+     */
+    fun calibrations(): Map<String, Calibration> {
+        val pos = HashMap<String, MutableList<Float>>()
+        val neg = HashMap<String, MutableList<Float>>()
+        val names = HashMap<String, String>()
+        readableDatabase.rawQuery(
+            "SELECT d.taxon_key, d.taxon_scientific, d.confidence, v.is_genuine, v.is_species " +
+            "FROM verifications v JOIN detections d ON d.id = v.detection_id", null
+        ).use {
+            while (it.moveToNext()) {
+                val key = it.getString(0)
+                names[key] = it.getString(1)
+                val conf = it.getFloat(2)
+                val genuine = it.getString(3)
+                val species = if (it.isNull(4)) null else it.getString(4)
+                when {
+                    // Only a species identification is a positive example OF THIS SPECIES.
+                    genuine == "yes" && species == "yes" -> pos.getOrPut(key) { ArrayList() } += conf
+                    // Not an animal, or a real animal that is not this species: either way
+                    // this score was wrong for this label.
+                    genuine == "no" || species == "no" -> neg.getOrPut(key) { ArrayList() } += conf
+                    // "Something real, but I don't know which" teaches nothing about the
+                    // species boundary and is counted on neither side.
+                }
+            }
+        }
+        val out = HashMap<String, Calibration>()
+        for (key in names.keys) {
+            val p = pos[key] ?: emptyList<Float>()
+            val n = neg[key] ?: emptyList<Float>()
+            if (p.isEmpty() && n.isEmpty()) continue
+            val calibrated = p.size >= CALIBRATION_MIN && n.size >= CALIBRATION_MIN
+            out[key] = Calibration(key, names[key] ?: "", p.size, n.size,
+                if (calibrated) learnThreshold(p, n) else null, calibrated,
+                p.minOrNull(), n.maxOrNull())
+        }
+        return out
+    }
+
+    fun calibrationFor(taxonKey: String): Calibration? = calibrations()[taxonKey]
+
+    /** The boundary itself. Separated out so the rule is readable and testable. */
+    private fun learnThreshold(pos: List<Float>, neg: List<Float>): Float {
+        val highestRejected = neg.max()
+        val lowestConfirmed = pos.min()
+        // Clean separation: put the line just above the worst false positive, which admits
+        // none of them and keeps every confirmation.
+        if (highestRejected < lowestConfirmed) {
+            return ((highestRejected + lowestConfirmed) / 2f).coerceIn(0f, MAX_EFFECTIVE_THRESHOLD)
+        }
+        // Overlapping. Scan every candidate cut and take the one with fewest mistakes,
+        // breaking ties UPWARD — a false accept corrupts the record, a false reject only
+        // costs another listen.
+        val cuts = (pos + neg).distinct().sorted()
+        var best = lowestConfirmed
+        var bestErrors = Int.MAX_VALUE
+        for (c in cuts) {
+            val errors = neg.count { it >= c } + pos.count { it < c }
+            if (errors <= bestErrors) { bestErrors = errors; best = c }
+        }
+        return best.coerceIn(0f, MAX_EFFECTIVE_THRESHOLD)
+    }
+
+    /** taxon_key -> learned threshold, for the species that have one. */
+    fun learnedThresholds(cals: Map<String, Calibration> = calibrations()): Map<String, Float> =
+        cals.values.mapNotNull { c -> c.threshold?.let { c.taxonKey to it } }.toMap()
+
+    fun allCalibrations(): List<Calibration> =
+        calibrations().values.sortedWith(
+            compareByDescending<Calibration> { it.calibrated }.thenByDescending { it.positives + it.negatives })
+
+    /**
+     * Whether a bout still has to be looked at by a human, and why.
+     *
+     * EXEMPTION REQUIRES BOTH A LEARNED THRESHOLD AND PLAUSIBILITY. Either alone is not
+     * enough: a calibrated threshold says "this score is normally right for this species
+     * here", and plausibility says "this species being here at all is normal". A confident
+     * score for an implausible species is precisely the case worth a human's attention.
+     *
+     * Four things are ALWAYS verified regardless of score:
+     *  - anything that would be a new species on the life list. A wrong 38th magpie costs
+     *    nothing; a wrong new species permanently corrupts the list.
+     *  - anything implausible for here and now.
+     *  - anything from a species with no learned threshold — an unverified species cannot
+     *    exempt itself.
+     *  - a small ongoing random sample of otherwise-exempt bouts, so drift in the noise
+     *    environment or the microphone shows up instead of hiding behind an old boundary.
+     */
+    data class VerifyNeed(val required: Boolean, val reason: String)
+
+    fun verifyNeed(bout: Bout, learned: Float?, prior: Double?, wouldBeLifer: Boolean,
+                   settings: Settings): VerifyNeed {
+        if (bout.verifyState == "done") return VerifyNeed(false, "already decided")
+        if (wouldBeLifer) return VerifyNeed(true, "would be new on the life list")
+        val implausible = (prior != null && prior < RARITY_PRIOR) || !bout.taxon.regional
+        if (implausible) return VerifyNeed(true, "implausible here and now")
+        if (learned == null) return VerifyNeed(true, "no learned threshold for this species yet")
+        if (bout.peakConfidence < learned) return VerifyNeed(true, "below the learned threshold")
+        if (auditSampled(bout.boutId)) return VerifyNeed(true, "random audit sample")
+        return VerifyNeed(false, "above the learned threshold for a plausible species")
+    }
+
+    /** Deterministic on the bout's first detection id, so the same bout is always either in
+     *  the sample or not — a random draw per request would re-roll on every refresh and
+     *  make the sample meaningless. */
+    fun auditSampled(boutId: Long): Boolean {
+        var h = boutId * -0x61c8864680b583ebL
+        h = h xor (h ushr 31)
+        return (h % AUDIT_EVERY + AUDIT_EVERY) % AUDIT_EVERY == 0L
+    }
+
+    /** The taxon behind a key, from the most recent row that carries it. Reference audio
+     *  needs the scientific name, and the species list asset is not addressable by key
+     *  from here. Null when nothing has ever been detected under that key. */
+    fun taxonForKey(taxonKey: String): Taxon? =
+        readableDatabase.rawQuery(
+            "SELECT taxon_key, taxon_scientific, taxon_common, taxon_group, taxon_rank, " +
+            "taxon_model_index, taxon_regional FROM detections WHERE taxon_key = ? " +
+            "ORDER BY detected_at_ms DESC LIMIT 1", arrayOf(taxonKey)
+        ).use {
+            if (!it.moveToFirst()) null
+            else Taxon(it.getString(0), it.getString(1), it.getString(2), it.getString(3),
+                it.getString(4), it.getInt(5), regional = it.getInt(6) != 0)
+        }
 
     /** species_status.status -> the life-list tier the API reports. */
     fun lifeTier(status: String?): String = when (status) {

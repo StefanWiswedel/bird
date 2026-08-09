@@ -780,6 +780,34 @@ footer { text-align: center; padding: var(--space-32) var(--space-16); }
       </div>
     </form>
 
+    <!-- An ordinary setting. Not a build secret and not a repo secret: it is rate-limit
+         attribution against a public archive. It still never leaves the phone, is never
+         logged, and is never sent back by the API — the field shows whether one is set. -->
+    <div class="label eyebrow">Reference recordings</div>
+    <div class="card">
+      <div class="f">
+        <label for="xcKey">xeno-canto API key</label>
+        <input type="password" id="xcKey" autocomplete="off" spellcheck="false" placeholder="not set">
+        <div class="hint">Lets the station fetch a known-good recording of each species to play
+        beside the clip, so identification becomes comparison. Without one, verification works
+        exactly as it does now and simply offers no reference audio.
+        Get a key from <a href="https://xeno-canto.org/account" target="_blank" rel="noopener noreferrer">xeno-canto.org</a>.</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:var(--space-16);flex-wrap:wrap">
+        <button type="button" class="btn" id="xcSave">Save key</button>
+        <button type="button" class="btn is-quiet" id="xcClear">Remove key</button>
+        <span class="note" id="xcNote"></span>
+      </div>
+    </div>
+
+    <!-- A threshold needs examples on BOTH sides. For a species heard twice a week that is
+         months away, so an exemption must never be mistakable for a tuned threshold. -->
+    <div class="label eyebrow">Learned thresholds</div>
+    <div class="card">
+      <div class="feed" id="calibList"></div>
+      <div class="note" id="calibNote"></div>
+    </div>
+
     <div class="label eyebrow">Device</div>
     <div class="card"><dl class="kv" id="deviceKv"></dl></div>
 
@@ -1027,6 +1055,7 @@ function selectTab(name) {
   // Audio must not keep playing over another tab. Both the Verify flow and the Days
   // bout player go through the same element, so one stop covers both.
   if (name !== "verify" && name !== "days") stopBoutAudio();
+  if (name !== "verify" && reference.playing) { reference.playing.pause(); reference.playing = null; }
   document.querySelectorAll("nav.tabs button").forEach(b =>
     b.setAttribute("aria-selected", String(b.dataset.tab === name)));
   document.querySelectorAll(".panel").forEach(p =>
@@ -1728,6 +1757,11 @@ async function openSpecies(taxonKey) {
   triage.phase = triage.i < 0 ? "finished" : "species";
   triage.answer = { isGenuine: null };
   renderVerify();
+  // On demand, for the species actually opened — never a sweep over the whole list.
+  // Repaints when it lands; the flow is fully usable before and without it.
+  loadReference(taxonKey).then(() => {
+    if (triage.current && triage.current.taxon.key === taxonKey) renderVerify();
+  });
 }
 
 function backToList() {
@@ -1841,6 +1875,16 @@ function verifyStripHtml(activity) {
     `<i style="opacity:${c ? (0.2 + 0.8 * c / peak).toFixed(3) : 0.07}"></i>`).join("")}</div>`;
 }
 
+/* CALIBRATED vs NOT, on the row. A species exempted by a learned threshold and one that
+   has simply never been checked look identical otherwise, and confusing them is how an
+   exemption gets mistaken for a tuned threshold. */
+function calibTag(c) {
+  if (!c) return "";
+  return c.calibrated
+    ? `<span class="tag" title="Learned from ${c.confirmed} confirmations and ${c.rejected} rejections here">${fmtScore(c.threshold)}</span>`
+    : `<span class="tag is-warn" title="${c.confirmed} confirmed, ${c.rejected} rejected — not enough on both sides yet">learning</span>`;
+}
+
 function triageRowHtml(s) {
   const tag = s.stake === "lifer" || s.stake === "implausible"
     ? `<span class="tag is-rare">${esc(s.stake)}</span>`
@@ -1850,9 +1894,10 @@ function triageRowHtml(s) {
       ${thumbHtml(s.photo)}
       <span class="taxon">
         ${taxonHtml(s.taxon)}
-        <span class="n">${s.bouts_pending} of ${s.bouts_total} left · ${esc(STAKE_COPY[s.stake] || "")}</span>
+        <span class="n">${s.bouts_pending} of ${s.bouts_total} left · ${esc(STAKE_COPY[s.stake] || "")}${
+          s.bouts_exempt ? ` · ${s.bouts_exempt} auto-accepted` : ""}</span>
       </span>
-      ${tag}
+      ${calibTag(s.calibration)}${tag}
       <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
     </button>
     ${verifyStripHtml(s.activity || [0,0,0,0,0,0])}
@@ -1892,6 +1937,44 @@ function verifyBoutHtml(b, s) {
    article is derived rather than baked into the copy. */
 function article(word) { return /^[aeiou]/i.test(word) ? "an" : "a"; }
 
+/* THE FOUR REFERENCE STATES, each said as itself. Collapsing them into "no reference
+   audio" would read as "the archive has nothing for this species", which is only one of
+   them and usually the wrong one (§2d). */
+const REFERENCE_COPY = {
+  no_key: "No xeno-canto key configured, so no reference recording has been looked up.",
+  none: "xeno-canto has no suitable recording of this species from Denmark or nearby.",
+  failed: "Could not reach xeno-canto.",
+  pending: "Not looked up yet.",
+};
+
+const reference = { byKey: {}, playing: null };
+
+async function loadReference(taxonKey) {
+  if (reference.byKey[taxonKey]) return reference.byKey[taxonKey];
+  const d = await apiMaybe(`/api/reference?taxon_key=${encodeURIComponent(taxonKey)}`);
+  // A station too old to serve this is not "no recording" either.
+  reference.byKey[taxonKey] = d || { state: "failed", reason: "This station build has no reference audio." };
+  return reference.byKey[taxonKey];
+}
+
+function referenceHtml(r, s) {
+  if (!r) return `<div class="note">Looking for a reference recording…</div>`;
+  if (r.state === "ready") {
+    const credit = [r.recordist, r.country, r.quality ? "quality " + r.quality : ""]
+      .filter(Boolean).map(esc).join(" · ");
+    return `<button type="button" class="btn v-playbtn" id="vRefPlay">▶ Play a known ${esc(s.taxon.common || s.taxon.scientific)}</button>
+      <div class="note">Reference from xeno-canto${credit ? " — " + credit : ""}${
+        r.source ? ` · <a href="${esc(r.source)}" target="_blank" rel="noopener noreferrer">source</a>` : ""}.
+        Does the recording above sound like this?</div>`;
+  }
+  // Every non-ready state keeps the verification flow fully usable — the reference is an
+  // aid, never a precondition.
+  const why = r.reason || REFERENCE_COPY[r.state] || "No reference recording.";
+  const fix = r.state === "no_key"
+    ? ` <a href="#settings" id="vRefSettings">Add a key in Settings</a> to turn this on.` : "";
+  return `<div class="note">${esc(why)}${fix}</div>`;
+}
+
 function verdictPanelHtml(b, s) {
   const name = s.taxon.common || s.taxon.scientific;
   const canPlay = b.clips.length > 0;
@@ -1917,8 +2000,12 @@ function verdictPanelHtml(b, s) {
     </div>
     <div class="note">The last answer is a real answer, not a skip: it records that
       something was genuinely here without claiming which species.</div>`;
+  // Two play buttons together: the clip, then a known example. This is the change that
+  // turns "name this bird" into "does this sound like that", which is answerable.
+  const ref = reference.byKey[s.taxon.key];
   return `<div class="v-controls">
     ${canPlay ? `<button type="button" class="btn v-playbtn" id="vPlay">▶ Play bout</button>` : ""}
+    ${referenceHtml(ref, s)}
     ${triage.answer.isGenuine === "yes" ? q2 : q1}
     <div class="v-secondary">
       <button type="button" class="btn is-quiet" id="vSkip">Skip this one</button>
@@ -1973,7 +2060,10 @@ function renderVerify() {
       <div class="det-summary" style="cursor:default;padding:0">
         ${thumbHtml(s.photo)}
         <span class="taxon">${taxonHtml(s.taxon)}
-          <span class="n">${esc(TIER_COPY[s.life_tier] || "")} · ${esc(STAKE_COPY[s.stake] || "")}</span>
+          <span class="n">${esc(TIER_COPY[s.life_tier] || "")} · ${esc(STAKE_COPY[s.stake] || "")}${
+            s.calibration && s.calibration.calibrated
+              ? ` · learned threshold ${fmtScore(s.calibration.threshold)}`
+              : " · no learned threshold yet"}</span>
         </span>
       </div>
     </div>`;
@@ -2018,6 +2108,24 @@ function renderVerify() {
     const card = m.querySelector(".v-bout");
     if (dayAudio) { stopBoutAudio(); play.textContent = "▶ Play bout"; }
     else { playBout(card, b); play.textContent = "■ Stop"; }
+  });
+  const refBtn = m.querySelector("#vRefPlay");
+  if (refBtn) refBtn.addEventListener("click", () => {
+    // Its own element, not the bout player: the two are meant to be played one after the
+    // other, and sharing one element would make each press stop the other.
+    if (reference.playing) { reference.playing.pause(); reference.playing = null; refBtn.textContent = "▶ Play reference"; return; }
+    stopBoutAudio();
+    const a = new Audio(stationUrl(`/api/reference/${encodeURIComponent(s.taxon.key)}`));
+    reference.playing = a;
+    refBtn.textContent = "■ Stop reference";
+    a.addEventListener("ended", () => { reference.playing = null; renderVerify(); });
+    a.addEventListener("error", () => {
+      reference.playing = null;
+      // Advertised and unplayable is a failure, not an absence.
+      reference.byKey[s.taxon.key] = { state: "failed", reason: "The cached reference recording would not play." };
+      renderVerify();
+    });
+    a.play().catch(() => { reference.playing = null; renderVerify(); });
   });
   m.querySelectorAll("[data-genuine]").forEach(btn => btn.addEventListener("click", () => {
     const v = btn.dataset.genuine;
@@ -2377,6 +2485,8 @@ async function loadSettings() {
     const s = await api("/api/settings");
     state.settings = s;
     applySettings(s);
+    renderKeyState(!!s.xeno_canto_key_set);
+    loadCalibration().catch(() => {});
   } catch (e) { /* the health poll carries settings too */ }
   renderDiagnostics();
 }
@@ -2565,6 +2675,72 @@ $("updateDashBtn").addEventListener("click", async () => {
 // file, a slow LAN and "save to Files" far better than anything built here would, and it
 // follows the configured station base like every other request.
 $("exportDbBtn").href = stationUrl("/api/data/export");
+
+/* The key is write-only across the API: the field shows whether one is set, never what it
+   is, so a screenshot of this screen or a captured /api/settings response leaks nothing. */
+function renderKeyState(set) {
+  const f = $("xcKey");
+  f.value = "";
+  f.placeholder = set ? "•••••••• (a key is set)" : "not set";
+  $("xcClear").classList.toggle("hidden", !set);
+}
+
+async function saveXcKey(value) {
+  const note = $("xcNote");
+  note.textContent = "Saving…";
+  try {
+    const r = await fetch(stationUrl("/api/settings"), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ xeno_canto_key: value }),
+    });
+    const out = await r.json();
+    if (!r.ok) throw new Error("status " + r.status);
+    state.settings = out;
+    renderKeyState(!!out.xeno_canto_key_set);
+    note.textContent = value ? "Key saved. Reference recordings will be fetched as you verify."
+                             : "Key removed. Reference recordings are off.";
+    // Cached statuses were computed under the old key state and are now wrong.
+    reference.byKey = {};
+  } catch (e) {
+    note.textContent = "Could not save — the station did not answer. Nothing was changed.";
+  }
+  setTimeout(() => { note.textContent = ""; }, 5000);
+}
+
+$("xcSave").addEventListener("click", () => {
+  const v = $("xcKey").value.trim();
+  if (!v) { $("xcNote").textContent = "Paste a key first."; return; }
+  saveXcKey(v);
+});
+$("xcClear").addEventListener("click", () => saveXcKey(""));
+
+/* WHICH SPECIES ARE ACTUALLY CALIBRATED. An exemption that looks like a tuned threshold
+   is worse than no exemption, so the ones still gathering evidence say so and say how
+   much is missing. */
+async function loadCalibration() {
+  const d = await apiMaybe("/api/calibration");
+  const host = $("calibList");
+  const note = $("calibNote");
+  if (!d) { host.innerHTML = ""; note.textContent = "This station build does not report learned thresholds."; return; }
+  if (!d.species.length) {
+    host.innerHTML = "";
+    note.textContent = `Nothing learned yet. A species needs ${d.min_each_side} confirmations `
+      + `and ${d.min_each_side} rejections before the station will trust a score for it.`;
+    return;
+  }
+  host.innerHTML = d.species.map(c => `<div class="det"><div class="det-summary" style="cursor:default">
+      <span class="taxon"><span class="common is-binomial">${esc(c.scientific)}</span>
+        <span class="n">${c.confirmed} confirmed · ${c.rejected} rejected${
+          c.calibrated ? "" : ` · needs ${c.needs} more on the thinner side`}</span></span>
+      ${c.calibrated
+        ? `<span class="tag">${fmtScore(c.threshold)}</span>`
+        : `<span class="tag is-warn">learning</span>`}
+    </div></div>`).join("");
+  const cal = d.species.filter(c => c.calibrated).length;
+  note.textContent = `${cal} of ${d.species.length} species calibrated. `
+    + `A calibrated species is exempt from routine checks above its threshold — except lifers, `
+    + `implausible records, and 1 in ${d.audit_every} kept as a random audit.`;
+}
 
 $("clearAllBtn").addEventListener("click", async () => {
   const note = $("clearAllNote");

@@ -982,6 +982,31 @@ its own measurement.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-08-09) **Reference recordings, and thresholds learned from verdicts** (§11q).
+  Identification becomes comparison: when a detection proposes a species, the station
+  fetches a known-good recording of it from xeno-canto and offers it beside the clip, so
+  the question changes from "name this bird" — unanswerable for this user — to "does this
+  sound like that", which anyone can answer and which teaches by repetition. Cached on disk
+  following `PhotoCache`, filtered to grade A and to Denmark first then its neighbours,
+  because dialects vary and a reference that does not match the local population teaches
+  the wrong comparison. The API key is **an ordinary setting**, entered once from the
+  dashboard: not a build secret, not a repo secret, never a build argument, and never
+  echoed back — `/api/settings` reports whether a key is set, not what it is. The station
+  **ships with no key**, and that path is the one that was built and tested first: `no_key`
+  is a distinct state from "the lookup failed" and from "the archive has no recording",
+  all three are said in their own words, and verification is fully usable without any of
+  them (§2d).
+  Per-species thresholds are now **learned from verdicts** and feed the existing
+  `effectiveThreshold` machinery, replacing the global default for a species exactly as a
+  manual override does and ranking below one. There is **no global "trust above X" and
+  none may be added** — the known-negative corpus peaks at 0.98 and is entirely false
+  positives. A threshold needs examples on both sides, and **rejections carry more
+  information than confirmations** because they pin the boundary from underneath, so the
+  rule prefers the most conservative line admitting no known false positive. Exemption from
+  routine verification requires **both** a learned threshold and plausibility; lifers,
+  implausible records, species with no learned threshold, and a deterministic 1-in-10 audit
+  sample are always asked about. Calibrated species are marked as such throughout the UI,
+  because an exemption that looks like a tuned threshold is worse than no exemption.
 - (2026-08-09) **Verification is triage with a two-part verdict; schema v7** (§11p). The
   station could not be verified by a non-expert, which made its output unverifiable in
   practice: the flow asked "is this a Blackbird?" of someone who can reliably tell a bird
@@ -2224,6 +2249,69 @@ tiles invites tapping the middle one.
 everything from the beginning and no way to take a copy first, and the phone cannot be
 reached from a laptop. The export checkpoints the WAL and holds a transaction across the
 copy, so it is a consistent snapshot rather than a database missing its most recent writes.
+
+### 11q. Reference audio, and learning where the line is
+
+**The comparison, not the name.** A detection proposing "Eurasian Blackbird" asks a
+question this station's user cannot answer. Playing a known Blackbird beside the clip asks
+a different question — *does this sound like that* — which anyone can answer, and which
+teaches the bird by repetition rather than requiring it to be known already. That is the
+whole feature; everything below is the care needed to make it honest.
+
+**The key is a setting, not a secret.** xeno-canto has required an API key since October
+2025. It is rate-limit attribution against a public archive, not access to anything of the
+owner's, so it is entered once in Settings like any other preference — deliberately not a
+build argument, a repo secret, or anything that could reach the repository. It is still
+**write-only across the API**: `/api/settings` reports `xeno_canto_key_set`, never the
+value, so a screenshot of the settings screen leaks nothing, and it is never written to a
+log line.
+
+**The station ships with no key, so the no-key path is the real path.** Four states, each
+said as itself:
+
+| state | meaning |
+|---|---|
+| `no_key` | nothing was attempted. Not a failure, not an absence of recordings |
+| `ready` | cached and playable, with recordist, country, quality and source |
+| `none` | the archive answered and has nothing for this species and region |
+| `failed` | the lookup failed; the reason says which way |
+
+Collapsing them would read as "the archive has nothing for this species", which is one of
+four and usually the wrong one. Every non-`ready` state leaves verification fully usable:
+the reference is an aid, never a precondition.
+
+**Thresholds learned from verdicts, and no global one.** `speciesThresholdOverrides` and
+`effectiveThreshold` already existed as manual settings; they are now fed from verification
+data. A learned threshold replaces the global default for its species exactly as a manual
+override does, and ranks below one, because a human's explicit number still wins.
+
+There is **no global "trust above X", and adding one would be a mistake with evidence
+against it**: the committed known-negative corpus peaks at **0.98** and is entirely false
+positives. BirdNET scores are not calibrated probabilities and vary by species, site and
+noise, so the only defensible threshold is one measured per species at this location.
+
+**Rejections locate the boundary; confirmations only bound it from above.** Ten
+confirmations and no rejections say the line is somewhere below the lowest confirmation and
+nothing more. So a species is calibrated only with at least three of each, and the rule
+prefers the most conservative line that admits no known false positive, falling back to an
+error-minimising cut (ties broken upward — a false accept corrupts the record, a false
+reject costs one more listen) only when the classes overlap. "Something real, but I don't
+know which" counts on neither side, because it says nothing about *this species'* boundary.
+
+**Exemption needs both halves.** A calibrated threshold says "this score is usually right
+for this species here"; plausibility says "this species being here is normal". A confident
+score for an implausible species is exactly the case worth attention, so neither alone
+exempts. Always verified regardless of score: anything that would be new on the life list,
+anything implausible, anything from a species with no learned threshold, and a **1-in-10
+random audit** of otherwise-exempt bouts — deterministic on the bout's first detection id,
+so it cannot be re-rolled by refreshing, and there to catch drift as noise sources change
+and the microphone ages.
+
+**Calibrated is marked as calibrated.** A species heard twice a week is months from having
+evidence on both sides, so the triage rows, the species header and a Settings list all
+distinguish a learned threshold from a species that has simply never been checked. An
+exemption a person cannot see is indistinguishable from a bug, so `bouts_exempt` is
+reported on the row rather than quietly missing from the count.
 
 ### 11n. Measured performance
 
