@@ -129,6 +129,9 @@ this is a LAN appliance the user opens from whatever device is to hand.
 | GET | `/api/verify/bouts` | one species' bouts, undecided first |
 | POST | `/api/verify/bout` | record the two-part verdict for a bout |
 | POST | `/api/verify/bulk` | accept remaining bouts of an established species |
+| GET | `/api/reference` | reference-recording status for one species |
+| GET | `/api/reference/{taxonKey}` | the cached reference recording, `audio/mpeg` |
+| GET | `/api/calibration` | learned per-species thresholds, and which species have one |
 | GET | `/api/data/export` | download `station.db` |
 | DELETE | `/api/data` | wipe all detections, clip files, and per-species overrides |
 
@@ -455,6 +458,82 @@ bouts already confirmed individually (`error: "too_few_confirmed"`); `reason` is
 meant to be shown. The rule is enforced here and not merely hidden in the UI — deciding a
 first record in a swipe is precisely the judgement that must not be made that way, and a
 rule only the client applies is not a rule.
+
+## 2d. Reference audio, and thresholds learned from verdicts
+
+### The xeno-canto key is an ordinary setting
+
+`POST /api/settings` accepts `xeno_canto_key`. It is **not** a build secret, not a repo
+secret, and never a build argument: it is rate-limit attribution against a public archive,
+not access to anything of the owner's.
+
+It is nonetheless **write-only across the API**. `GET /api/settings` reports
+`xeno_canto_key_set: true|false` and never the value, so a screenshot of the settings
+screen or a captured response leaks nothing. Omitting the field from a PATCH leaves the
+stored key alone; sending `""` clears it.
+
+### `GET /api/reference?taxon_key=…` — four states, never three
+
+| `state` | meaning |
+|---|---|
+| `no_key` | no key is configured, so **nothing was attempted**. The station ships this way |
+| `ready` | a recording is cached; `url`, `recordist`, `license`, `country`, `quality`, `source` |
+| `none` | the archive answered and has nothing matching for this species and region |
+| `failed` | the lookup itself failed; `reason` says why |
+
+`no_key` is not a failure and is not an absence of recordings. Collapsing these into "no
+reference audio" would read as "the archive has nothing for this species", which is only
+one of them and usually the wrong one (§2d). Every non-`ready` state leaves the
+verification flow **fully usable** — the reference is an aid, never a precondition.
+
+Fetches happen on demand for the species being verified, never as a background sweep over
+the species list: a sweep would spend the phone's radio and the archive's rate limit on
+species nobody is about to look at. Recordings are filtered to grade A and to Denmark
+first, then Sweden, Germany, Norway, Netherlands, Poland — dialects vary, and a reference
+that does not match the local population teaches the wrong comparison.
+
+### `GET /api/calibration` — thresholds learned from verdicts
+
+```json
+{ "schema": 1, "min_each_side": 3, "audit_every": 10, "count": 4,
+  "species": [ { "taxon_key": "columba_palumbus", "confirmed": 3, "rejected": 3,
+                 "calibrated": true, "threshold": 0.621,
+                 "lowest_confirmed": 0.985, "highest_rejected": 0.258, "needs": 0 } ] }
+```
+
+**There is no global "trust above X" and none may be added.** The committed known-negative
+corpus peaks at 0.98 and is entirely false positives; BirdNET scores are not calibrated
+probabilities and vary by species, site and noise. The only defensible threshold is one
+measured per species, here.
+
+A threshold needs examples on **both sides** — `min_each_side` of each. A species with ten
+confirmations and no rejections tells you only that the line is somewhere below the lowest
+confirmation. **Rejections carry more information than confirmations**: they pin the
+boundary from underneath, so the rule prefers the most conservative line admitting no known
+false positive, and falls back to an error-minimising split (ties broken upward) only when
+the classes overlap. `"a bird, but I don't know which"` counts on neither side.
+
+A learned threshold feeds `effectiveThreshold` exactly as a manual override does — it
+replaces the global default for that species — and ranks **below** a manual override,
+because a human's explicit number still wins.
+
+**Exemption requires both a learned threshold and plausibility.** Regardless of score,
+these are always put in front of a human:
+
+- anything that would be a **new species on the life list** — a wrong 38th magpie costs
+  nothing, a wrong new species permanently corrupts the list;
+- anything **implausible** for here and now;
+- anything from a species with **no learned threshold** — an unverified species cannot
+  exempt itself;
+- **1 in `audit_every`** of the otherwise-exempt bouts, deterministic on the bout's first
+  detection id so it cannot be re-rolled by refreshing, to catch drift as noise sources
+  change and the microphone ages.
+
+`/api/verify/species` reports `bouts_exempt` and a `calibration` block per row, and the UI
+must **distinguish calibrated species from uncalibrated ones** — an exemption that looks
+like a tuned threshold is worse than no exemption.
+
+---
 
 ### `GET /api/data/export`
 

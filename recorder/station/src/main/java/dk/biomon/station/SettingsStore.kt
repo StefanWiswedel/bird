@@ -17,7 +17,9 @@ class SettingsStore(ctx: Context) {
         repeatRequired = prefs.getInt("repeat_required", 2),
         repeatWindowMin = prefs.getInt("repeat_window_min", 30),
         boutGapSeconds = prefs.getInt("bout_gap_s", 60),
-        regionSeasonFilterEnabled = prefs.getBoolean("region_season_filter_enabled", true)
+        regionSeasonFilterEnabled = prefs.getBoolean("region_season_filter_enabled", true),
+        // Stored like any other setting. Never logged, never returned by the API.
+        xenoCantoKey = prefs.getString("xeno_canto_key", "") ?: ""
     )
 
     @Synchronized
@@ -31,6 +33,7 @@ class SettingsStore(ctx: Context) {
             .putInt("repeat_window_min", merged.repeatWindowMin)
             .putInt("bout_gap_s", merged.boutGapSeconds)
             .putBoolean("region_season_filter_enabled", merged.regionSeasonFilterEnabled)
+            .putString("xeno_canto_key", merged.xenoCantoKey)
             .apply()
         return merged
     }

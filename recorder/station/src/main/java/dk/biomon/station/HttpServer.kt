@@ -502,6 +502,54 @@ class HttpServer(
                     .put("count", arr.length()).put("queue", arr)
                     .put("life_list_size", db.lifeList().count { it.status == "confirmed" }))
             }
+            // REFERENCE AUDIO. Fetched on demand for one species, never as a background
+            // sweep: a sweep would spend the phone's radio and the archive's rate limit on
+            // species nobody is about to verify.
+            p == "/api/reference" && req.method == "GET" -> {
+                val key = req.query["taxon_key"]
+                if (key.isNullOrBlank()) {
+                    writeJson(out, 400, JSONObject().put("error", "taxon_key is required")); return
+                }
+                val taxon = db.taxonForKey(key)
+                if (taxon == null) { writeJson(out, 404, JSONObject().put("error", "unknown taxon")); return }
+                val allowFetch = req.query["fetch"] != "false"
+                writeJson(out, 200, ReferenceAudio.statusFor(ctx, taxon, settings.get().xenoCantoKey, allowFetch))
+            }
+            p.startsWith("/api/reference/") && req.method == "GET" -> {
+                val key = p.removePrefix("/api/reference/")
+                val f = ReferenceAudio.cachedAudio(ctx, key)
+                if (f == null) {
+                    writeJson(out, 404, JSONObject().put("error", "no cached reference recording")); return
+                }
+                serveFileWithRange(out, f, "audio/mpeg", req.headers["range"])
+            }
+            p == "/api/reference" && req.method == "DELETE" -> {
+                val key = req.query["taxon_key"]
+                if (key.isNullOrBlank()) {
+                    writeJson(out, 400, JSONObject().put("error", "taxon_key is required")); return
+                }
+                ReferenceAudio.forget(ctx, key)
+                writeJson(out, 200, JSONObject().put("forgotten", key))
+            }
+            // WHICH SPECIES ARE ACTUALLY CALIBRATED. A threshold needs examples on both
+            // sides, and for a species heard twice a week that is months away — so an
+            // exemption must never be mistakable for a tuned threshold.
+            p == "/api/calibration" -> {
+                val arr = jsonArrayOf(db.allCalibrations().map { c ->
+                    JSONObject()
+                        .put("taxon_key", c.taxonKey).put("scientific", c.scientific)
+                        .put("confirmed", c.positives).put("rejected", c.negatives)
+                        .put("calibrated", c.calibrated)
+                        .put("threshold", c.threshold?.let { round3(it) } ?: JSONObject.NULL)
+                        .put("lowest_confirmed", c.lowestConfirmed?.let { round3(it) } ?: JSONObject.NULL)
+                        .put("highest_rejected", c.highestRejected?.let { round3(it) } ?: JSONObject.NULL)
+                        .put("needs", (Database.CALIBRATION_MIN - minOf(c.positives, c.negatives)).coerceAtLeast(0))
+                })
+                writeJson(out, 200, JSONObject().put("schema", 1)
+                    .put("min_each_side", Database.CALIBRATION_MIN)
+                    .put("audit_every", Database.AUDIT_EVERY)
+                    .put("count", arr.length()).put("species", arr))
+            }
             // THE TRIAGE LIST. A list you choose from, not a queue that advances into you:
             // a flow with no visible end does not get started, and finishing a species has
             // to feel like finishing.
@@ -521,6 +569,12 @@ class HttpServer(
                         .put("rarity_flag", s.prior != null && s.prior < Database.RARITY_PRIOR)
                         .put("would_be_lifer", s.wouldBeLifer)
                         .put("stake", s.stake).put("stake_reason", s.stakeReason)
+                        .put("bouts_exempt", s.boutsExempt)
+                        .put("calibration", s.calibration?.let { c -> JSONObject()
+                            .put("calibrated", c.calibrated)
+                            .put("threshold", c.threshold?.let { round3(it) } ?: JSONObject.NULL)
+                            .put("confirmed", c.positives).put("rejected", c.negatives)
+                        } ?: JSONObject.NULL)
                         .put("bulk_allowed", s.bulkAllowed)
                         .put("last_ms", s.lastMs)
                         .put("activity", org.json.JSONArray().also { a -> s.activity.forEach { a.put(it) } })

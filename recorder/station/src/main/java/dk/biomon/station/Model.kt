@@ -186,7 +186,19 @@ data class Settings(
      *  (the `species_settings` table, set via `POST /api/species/{key}/threshold`) is
      *  unaffected by this flag either way — an override is a human's precise answer for
      *  that species and always wins over the heuristic. */
-    val regionSeasonFilterEnabled: Boolean = true
+    val regionSeasonFilterEnabled: Boolean = true,
+    /**
+     * xeno-canto API key, for reference recordings (§11q). An ordinary setting, entered
+     * once from the dashboard — NOT a build secret and not a repo secret: it is rate-limit
+     * attribution against a public archive, not access to anything of the owner's.
+     *
+     * It still never leaves the phone. It is never logged, never accepted as a build
+     * argument, and never echoed back: [json] reports whether a key is SET, not what it
+     * is, so a dashboard screenshot or a mock recording of /api/settings cannot leak it.
+     * The empty string means "no key", which is the state the station ships in and which
+     * every code path must handle honestly (§2d).
+     */
+    val xenoCantoKey: String = ""
 ) {
     fun json(): JSONObject = JSONObject()
         .put("display_threshold", displayThreshold.toDouble())
@@ -196,6 +208,8 @@ data class Settings(
         .put("repeat_window_min", repeatWindowMin)
         .put("bout_gap_s", boutGapSeconds)
         .put("region_season_filter_enabled", regionSeasonFilterEnabled)
+        // PRESENCE, never the value. See xenoCantoKey.
+        .put("xeno_canto_key_set", xenoCantoKey.isNotBlank())
 
     companion object {
         fun from(o: JSONObject, base: Settings) = Settings(
@@ -211,7 +225,12 @@ data class Settings(
             // Kept reachable rather than removed: the old behaviour is what every stored
             // row was curated under, and a reader comparing against history needs it.
             boutGapSeconds = o.optInt("bout_gap_s", base.boutGapSeconds).coerceIn(0, 3600),
-            regionSeasonFilterEnabled = o.optBoolean("region_season_filter_enabled", base.regionSeasonFilterEnabled)
+            regionSeasonFilterEnabled = o.optBoolean("region_season_filter_enabled", base.regionSeasonFilterEnabled),
+            // Absent leaves the stored key alone; an explicit empty string clears it. A
+            // PATCH that simply does not mention the key must never wipe it, which is what
+            // would happen if this defaulted to "".
+            xenoCantoKey = if (o.has("xeno_canto_key")) o.optString("xeno_canto_key").trim()
+                           else base.xenoCantoKey
         )
     }
 }

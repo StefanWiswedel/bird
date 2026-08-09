@@ -21,6 +21,9 @@ Runtime toggles (so one running server can be flipped while screenshotting):
                                     what POST /api/dashboard/update reports
     GET /mock/mode?recording=1|0    health.storage.recording (a bout is open)
     GET /mock/mode?clips_failed=N   health.storage.clips_failed
+    GET /mock/mode?reference=nokey|ok|none|failed
+                                    what GET /api/reference reports. nokey is the
+                                    default because it is how the station ships.
     GET /mock/emit                  emit one live detection right now
 
 Deliberate deviation from the contract, for the mock only: /api/photo/{key}
@@ -123,6 +126,10 @@ MAX_EFFECTIVE_THRESHOLD = 0.99
 # taxon_key -> override threshold, set via POST /api/species/{key}/threshold.
 SPECIES_OVERRIDES = {}
 
+# Set via POST /api/settings. Presence only is ever reported back — the mock deliberately
+# mirrors the station's rule that the key is never echoed.
+XC_KEY = [""]
+
 MODE = {
     "empty": False,
     "throttled": False,
@@ -138,6 +145,10 @@ MODE = {
     # Toggleable so the "audio is silently not being kept" state can be looked at.
     "clips_failed": 0,
     "recording": False,
+    # Reference audio. "nokey" is the state the station SHIPS in, so it is the default
+    # here too — the no-key path is the one that must be built and looked at first.
+    # ok | nokey | none | failed  (§2d: three different things, never one.)
+    "reference": "nokey",
 }
 
 # When the mock last "updated" the dashboard, epoch ms, or None for "never pulled" —
@@ -313,7 +324,120 @@ def serialize(row):
 
 def settings_snapshot():
     with LOCK:
-        return dict(SETTINGS)
+        out = dict(SETTINGS)
+    # Presence, never the value — the same rule the station follows.
+    out["xeno_canto_key_set"] = bool(XC_KEY[0])
+    return out
+
+
+CALIBRATION_MIN = 3
+AUDIT_EVERY = 10
+
+
+def calibrations():
+    """Learned per-species thresholds from the mock's verdicts, mirroring Database.calibrations.
+
+    Only a species identification is a positive; "not real" or "a different species" is a
+    negative; "something real, but I don't know which" counts on neither side, because it
+    says nothing about where this species' boundary is.
+    """
+    pos, neg, names = {}, {}, {}
+    for r in ROWS:
+        v = VERDICTS.get(r["id"])
+        if not v:
+            continue
+        key = r["sp"][0]
+        names[key] = r["sp"][1]
+        genuine, species = v
+        if genuine == "yes" and species == "yes":
+            pos.setdefault(key, []).append(r["conf"])
+        elif genuine == "no" or species == "no":
+            neg.setdefault(key, []).append(r["conf"])
+    out = {}
+    for key, sci in names.items():
+        p, n = pos.get(key, []), neg.get(key, [])
+        if not p and not n:
+            continue
+        calibrated = len(p) >= CALIBRATION_MIN and len(n) >= CALIBRATION_MIN
+        thr = learn_threshold(p, n) if calibrated else None
+        out[key] = {"taxon_key": key, "scientific": sci, "confirmed": len(p), "rejected": len(n),
+                    "calibrated": calibrated, "threshold": thr,
+                    "lowest_confirmed": min(p) if p else None,
+                    "highest_rejected": max(n) if n else None,
+                    "needs": max(0, CALIBRATION_MIN - min(len(p), len(n)))}
+    return out
+
+
+def learn_threshold(pos, neg):
+    """Rejections pin the boundary from underneath, so a line that admits no known false
+    positive wins; only when the classes overlap does this fall back to fewest errors,
+    breaking ties upward."""
+    hi_rej, lo_pos = max(neg), min(pos)
+    if hi_rej < lo_pos:
+        return round(min(0.99, (hi_rej + lo_pos) / 2), 3)
+    best, best_err = lo_pos, 10 ** 9
+    for c in sorted(set(pos + neg)):
+        err = sum(1 for x in neg if x >= c) + sum(1 for x in pos if x < c)
+        if err <= best_err:
+            best_err, best = err, c
+    return round(min(0.99, best), 3)
+
+
+def audit_sampled(bout_id):
+    h = (bout_id * 2654435761) & 0xFFFFFFFF
+    return h % AUDIT_EVERY == 0
+
+
+def verify_need(bout, learned, prior, would_be_lifer):
+    """Exemption requires BOTH a learned threshold and plausibility. Lifers, implausible
+    detections and the audit sample are always asked about."""
+    if bout["verification"]["state"] == "done":
+        return False, "already decided"
+    if would_be_lifer:
+        return True, "would be new on the life list"
+    if prior is not None and prior < RARITY_PRIOR:
+        return True, "implausible here and now"
+    if learned is None:
+        return True, "no learned threshold for this species yet"
+    if bout["peak_confidence"] < learned:
+        return True, "below the learned threshold"
+    if audit_sampled(bout["bout_id"]):
+        return True, "random audit sample"
+    return False, "above the learned threshold for a plausible species"
+
+
+REFERENCE_META = {
+    "recordist": "A. Recordist",
+    "license": "//creativecommons.org/licenses/by-nc-sa/4.0/",
+    "country": "Denmark",
+    "quality": "A",
+    "source": "https://xeno-canto.org/000000",
+    "seconds": 24.0,
+}
+
+
+def reference_body(taxon_key):
+    """The four states, all distinguishable (§2d).
+
+    no_key is not a failure and not an absence of recordings — nothing was attempted.
+    """
+    sp = next((x for x in SPECIES if x[0] == taxon_key), None)
+    base = {"taxon_key": taxon_key, "scientific": sp[1] if sp else taxon_key}
+    mode = MODE["reference"]
+    if not XC_KEY[0] or mode == "nokey":
+        return dict(base, state="no_key", reason=(
+            "No xeno-canto API key is configured, so no reference recording has been "
+            "looked up."))
+    if mode == "failed":
+        return dict(base, state="failed", reason=(
+            "Cannot resolve xeno-canto.org — the station has no DNS, so it is probably "
+            "off the network."))
+    if mode == "none":
+        return dict(base, state="none", checked_at_ms=now_ms(), reason=(
+            "xeno-canto has no A-grade recording of %s from Denmark or its neighbours."
+            % base["scientific"]))
+    return dict(base, state="ready", url="/api/reference/" + taxon_key,
+                bytes=48000, **REFERENCE_META)
 
 
 def visible_rows():
@@ -808,10 +932,10 @@ def triage_body():
     keys = {}
     for r in visible_rows():
         keys.setdefault(r["sp"][0], r["sp"])
+    cals = calibrations()
     for key, sp in keys.items():
         bouts = bouts_for_species(key)
-        pending = [b for b in bouts if b["verification"]["state"] != "done"]
-        if not bouts or not pending:
+        if not bouts:
             continue
         tier = life_tier(SPECIES_TIER.get(sp[1], "candidate"))
         if tier == "rejected":
@@ -834,10 +958,17 @@ def triage_body():
         activity = [0] * 6
         for b in bouts:
             activity[bin_of(bins, b["start_ms"])] += 1
-        done = len(bouts) - len(pending)
+        learned = (cals.get(key) or {}).get("threshold")
+        needs = [verify_need(b, learned, prior, would_be_lifer)[0] for b in bouts]
+        pending_n = sum(1 for x in needs if x)
+        if pending_n == 0:
+            continue
+        done = sum(1 for b in bouts if b["verification"]["state"] == "done")
+        exempt = len(bouts) - done - pending_n
         out.append({
             "taxon": taxon_of(sp), "life_tier": tier,
-            "bouts_total": len(bouts), "bouts_done": done, "bouts_pending": len(pending),
+            "bouts_total": len(bouts), "bouts_done": done, "bouts_pending": pending_n,
+            "bouts_exempt": exempt, "calibration": cals.get(key),
             "peak_confidence": peak, "threshold": thr,
             "prior": prior, "rarity_flag": prior < RARITY_PRIOR,
             "would_be_lifer": would_be_lifer,
@@ -1080,8 +1211,11 @@ class Handler(BaseHTTPRequestHandler):
                         SETTINGS[k] = patch[k]
                 if "region_season_filter_enabled" in patch and isinstance(patch["region_season_filter_enabled"], bool):
                     SETTINGS["region_season_filter_enabled"] = patch["region_season_filter_enabled"]
-                out = dict(SETTINGS)
-            return self._json(out)
+                # Absent leaves the stored key alone; an explicit empty string clears it.
+                # Never echoed back — settings_snapshot reports presence only.
+                if "xeno_canto_key" in patch and isinstance(patch["xeno_canto_key"], str):
+                    XC_KEY[0] = patch["xeno_canto_key"].strip()
+            return self._json(settings_snapshot())
 
         m = re.match(r"^/api/species/([^/]+)/threshold$", path)
         if m:
@@ -1159,6 +1293,27 @@ class Handler(BaseHTTPRequestHandler):
             self._cors()
             self.end_headers()
             return self.wfile.write(blob)
+
+        if path == "/api/reference":
+            key = (q.get("taxon_key") or [""])[0]
+            if not key:
+                return self._json({"error": "taxon_key is required"}, 400)
+            return self._json(reference_body(key))
+
+        if path.startswith("/api/reference/"):
+            key = path[len("/api/reference/"):]
+            if MODE["reference"] != "ok" or not XC_KEY[0]:
+                return self._json({"error": "no cached reference recording"}, 404)
+            # A short silent MP3-ish blob: enough for <audio> to attempt playback and for
+            # the UI to be exercised. The mock has no real archive behind it.
+            return self._bytes(b"\xff\xfb\x90\x00" + b"\x00" * 4096, "audio/mpeg")
+
+        if path == "/api/calibration":
+            cals = sorted(calibrations().values(),
+                          key=lambda c: (not c["calibrated"], -(c["confirmed"] + c["rejected"])))
+            return self._json({"schema": SCHEMA, "min_each_side": CALIBRATION_MIN,
+                               "audit_every": AUDIT_EVERY,
+                               "count": len(cals), "species": cals})
 
         if path == "/api/verify/species":
             return self._json(triage_body())
@@ -1238,6 +1393,8 @@ class Handler(BaseHTTPRequestHandler):
                 MODE["recording"] = q["recording"][0] not in ("0", "false", "no")
             if "clips_failed" in q:
                 MODE["clips_failed"] = int(q["clips_failed"][0])
+            if "reference" in q:
+                MODE["reference"] = q["reference"][0]
             return self._json(dict(MODE))
 
         if path == "/mock/emit":
