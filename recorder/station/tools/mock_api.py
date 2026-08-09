@@ -19,6 +19,8 @@ Runtime toggles (so one running server can be flipped while screenshotting):
     GET /mock/mode?live=<seconds>   how often a new live detection is produced
     GET /mock/mode?dashboard=ok|network|http|validation|write
                                     what POST /api/dashboard/update reports
+    GET /mock/mode?recording=1|0    health.storage.recording (a bout is open)
+    GET /mock/mode?clips_failed=N   health.storage.clips_failed
     GET /mock/emit                  emit one live detection right now
 
 Deliberate deviation from the contract, for the mock only: /api/photo/{key}
@@ -132,6 +134,10 @@ MODE = {
     # can actually report; the failure UI has to be developable too, and it is the half
     # that never gets exercised by accident.
     "dashboard": "ok",
+    # health.storage: clips the station could not write, and whether a bout is open.
+    # Toggleable so the "audio is silently not being kept" state can be looked at.
+    "clips_failed": 0,
+    "recording": False,
 }
 
 # When the mock last "updated" the dashboard, epoch ms, or None for "never pulled" —
@@ -215,7 +221,15 @@ def make_row(sp, ts_ms, rnd):
         "repeat": repeat,
         "has_photo": sp[0] not in NO_PHOTO_KEYS and rnd.random() > 0.08,
         "has_clip": rnd.random() > 0.07,
-        "clip_s": round(rnd.choice([3.0, 4.5, 6.0, 6.0, 9.0]), 1),
+        # Bout-scoped clips: pre-roll + the bout + post-roll, so the durations are the
+        # station's real range now (ring 8 s + post-roll 4 s at the short end, the 60 s
+        # cap at the long end) rather than the model's 3 s window.
+        "clip_s": round(rnd.choice([12.0, 12.0, 15.5, 21.0, 33.0, 60.0]), 1),
+        # How far into the clip this detection sits. Always at least the pre-roll, since
+        # the recording starts before the trigger. A few rows carry None to exercise the
+        # "clip written before bout clips existed" path, which must render as unknown
+        # rather than as zero.
+        "clip_offset_s": None if rnd.random() < 0.12 else round(rnd.uniform(5.0, 8.0), 1),
     }
 
 
@@ -252,7 +266,16 @@ def serialize(row):
         photo = dict(PHOTO_META, url="/api/photo/" + sp[0])
     clip = None
     if row["has_clip"]:
-        clip = {"url": "/api/clip/%d" % row["id"], "seconds": row["clip_s"], "mime": "audio/wav"}
+        off = row.get("clip_offset_s")
+        clip = {
+            "url": "/api/clip/%d" % row["id"],
+            "seconds": row["clip_s"],
+            "mime": "audio/wav",
+            # null, never 0, when the offset is unknown (API.md) — the two mean different
+            # things and a fabricated zero is indistinguishable from a real one.
+            "starts_at_ms": None if off is None else int(row["ts"] - off * 1000),
+            "detection_offset_s": off,
+        }
     return {
         "schema": SCHEMA,
         "id": row["id"],
@@ -411,8 +434,12 @@ def health_body():
         "thermal": {"battery_c": 41.7 if MODE["throttled"] else 33.2,
                     "status": "MODERATE" if MODE["throttled"] else "NONE",
                     "throttled": bool(MODE["throttled"])},
-        "storage": {"clips_bytes": 812334592, "cap_bytes": 10737418240,
-                    "free_bytes": 115964116992, "clips": clips, "pruned_total": 0},
+        # clips counts FILES, not rows — a bout clip is shared. clips_failed is reported
+        # separately so "could not write audio" never hides inside "quiet day" (API.md).
+        "storage": {"clips_bytes": 812334592, "cap_bytes": 17179869184,
+                    "free_bytes": 115964116992, "clips": clips, "pruned_total": 0,
+                    "clips_written": clips + 96, "clips_failed": MODE["clips_failed"],
+                    "recording": MODE["recording"]},
         "queue": {"pending": 0, "publishers": ["local"]},
         "settings": st,
         "dashboard": {
@@ -768,6 +795,10 @@ class Handler(BaseHTTPRequestHandler):
                 MODE["live_interval"] = float(q["live"][0])
             if "dashboard" in q:
                 MODE["dashboard"] = q["dashboard"][0]
+            if "recording" in q:
+                MODE["recording"] = q["recording"][0] not in ("0", "false", "no")
+            if "clips_failed" in q:
+                MODE["clips_failed"] = int(q["clips_failed"][0])
             return self._json(dict(MODE))
 
         if path == "/mock/emit":

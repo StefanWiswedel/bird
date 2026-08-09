@@ -64,6 +64,11 @@ data class Detection(
     val confidence: Float,
     val clipPath: String?,
     val clipSeconds: Double,
+    /** Wall-clock start of the clip's audio. A bout clip begins before the detection that
+     *  triggered it (BoutRecorder's pre-roll), so `detected_at_ms - clip_start_ms` is where
+     *  in the file this detection actually is. Null on rows that predate bout clips —
+     *  unknown, which is not the same as zero. */
+    val clipStartMs: Long? = null,
     /** Filled at READ time by the curator, never stored — see Curator. */
     val state: String = "candidate",
     val repeatCount: Int = 1,
@@ -90,7 +95,14 @@ data class Detection(
         .put("regional", regional)
         .put("in_season", inSeason)
         .put("clip", if (clipPath == null) JSONObject.NULL else JSONObject()
-            .put("url", "/api/clip/$id").put("seconds", clipSeconds).put("mime", "audio/wav"))
+            .put("url", "/api/clip/$id").put("seconds", clipSeconds).put("mime", "audio/wav")
+            .put("starts_at_ms", clipStartMs ?: JSONObject.NULL)
+            // Where in the clip this detection begins. Computed here rather than in the
+            // client so every consumer agrees, and null — never 0 — when the clip's start
+            // is unknown, because "play from the beginning" and "we don't know where it is"
+            // are different answers (§2d).
+            .put("detection_offset_s", clipStartMs?.let {
+                Math.round((detectedAtMs - it) / 100.0) / 10.0 } ?: JSONObject.NULL))
         .put("photo", photo ?: JSONObject.NULL)
         .put("station", station)
 

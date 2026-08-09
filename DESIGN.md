@@ -982,6 +982,28 @@ its own measurement.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-08-09) **Clips are bouts now, with pre-roll and post-roll** (§11m). The station
+  stored exactly the 3.0 s model window. Three seconds is what BirdNET needs and it is not
+  what a person needs: identification by ear runs on rhythm, repetition and phrase
+  structure, so a single chirp cut from the middle of a phrase is ambiguous even to an
+  expert — and the person this station is for cannot identify species by ear at all, which
+  is the whole point. A continuously singing bird also produced a new 3 s file every 1.5 s
+  hop: a dozen fragments of one event, none of them the event. `BoutRecorder` now keeps a
+  ring buffer off `AudioCapture`'s continuous PCM tap so audio from *before* the trigger
+  can be written (detections fire mid-phrase and the opening notes are often the
+  diagnostic part), keeps the recording open while detections keep arriving so one bout is
+  one file, and closes it a few seconds after the last one. Because a clip runs on past its
+  trigger it cannot be written when the detection is scored, so the row goes in with no
+  clip and is updated when the audio is complete — the deferral is the whole reason this is
+  stateful, and the consistency rule that falls out of it is that audio is staged as
+  `.part` and renamed into place before any row names it, so a row can never reference a
+  file that was never finished. Schema v6 adds `clip_start_ms` (additive only; the v3/v4
+  `DELETE FROM detections` pattern is not repeated) so the API can say where inside a bout
+  clip a detection actually sits, `null` rather than `0` when that is unknown. One file is
+  now shared by many rows, which quietly broke three storage paths that counted rows —
+  pruning deleted a file while nulling one row and left the rest pointing at nothing — all
+  now keyed on distinct `clip_path`. Modelled against the committed corpus the cap moves
+  8 GB → 16 GB; the arithmetic and its assumptions are in the constant's comment.
 - (2026-08-08) **The dashboard is served from storage and updates itself; the APK gets a
   release pipeline** (§11l). Two problems with the same root: the station phone is going
   outside permanently, and nothing in the cloud can reach it — it sits behind NAT on a home
@@ -1971,6 +1993,72 @@ resolve against whatever is serving the page. `writeCors` also had to learn `DEL
 `?station=` parameter the base is `""` and the on-phone dashboard behaves exactly as
 before; this exists so the UI can be iterated on from a laptop against a real station or
 the mock.
+
+### 11m. Bout clips: what gets recorded, and why it is not a window
+
+**The window is the model's unit, not the listener's.** BirdNET scores 3.0 s and the clip
+was 3.0 s, which was never a decision so much as an absence of one. Song identification
+depends on rhythm, repetition and phrase structure; three seconds is often a single chirp,
+and a single chirp is ambiguous to an expert. The station's user is explicitly not an
+expert — he can tell a bird from a bike brake and cannot name species by ear — so a clip
+that only an expert could use is a clip that cannot be verified at all.
+
+Three consequences, each of which forces a piece of `BoutRecorder`:
+
+- **Pre-roll.** Detections fire mid-phrase and the opening notes are frequently the
+  diagnostic part, so the clip must begin before the trigger. A ring buffer fed from
+  `AudioCapture.onPcm` — the continuous tap that already exists for the spectrogram, every
+  sample exactly once, before windowing — holds the recent past so it can be written
+  retroactively. The ring is exactly the pre-roll plus the model window (8 s, 768 kB at
+  48 kHz mono 16-bit) because the whole ring is dumped when a clip opens and that is
+  precisely the audio wanted.
+- **Post-roll forces a deferred write.** The future cannot be recorded, so the clip is
+  finished seconds after the detection that triggered it and the rows are updated
+  afterwards. This is the only place in the station where a row is written incomplete and
+  filled in later, and it is unavoidable.
+- **One clip per bout.** The recording stays open while detections keep arriving, so a
+  bird singing for twenty seconds produces one twenty-second clip instead of fourteen
+  overlapping fragments — fewer files *and* better ones. A hard 60 s cap bounds it; a bird
+  can sing for ten minutes and nobody listens to a ten-minute WAV.
+
+**The audio-continuity gap is deliberately not `boutGapSeconds`.** That setting (60 s)
+answers "are these the same piece of evidence?" and continues to do exactly that in
+`countBouts`. Whether to record the silence *between* two calls is a different question,
+and answering it with 60 s was measured against the committed corpus to produce 35% more
+bytes than a 4 s gap, all of it silence, in clips a person then has to sit through.
+Adjacent windows of one continuous song are 1.5 s apart, far inside either value, so the
+case that motivated bout clips is covered identically. Two questions, two constants.
+
+**Consistency was the hard part, and the rule is one-way.** Audio streams to
+`<name>.wav.part`; the header is rewritten with the true length, the file is renamed into
+place, and only then do the rows learn the path. Every abnormal exit therefore lands on one
+of two states — a finished clip with rows pointing at it, or an orphan `.part` that no row
+references and that the next start deletes. Service shutdown finishes the bout short rather
+than discarding it (four seconds less audio beats no audio). A failed write abandons the
+clip and leaves the rows with `clip_path` null, which the API already documents, rather
+than leaving a truncated file that would play as a fragment and look like success (§2d).
+The same principle put `clips_failed` in `/api/health` and a banner on the dashboard: a
+station that has silently stopped keeping audio otherwise looks exactly like a station on a
+quiet day.
+
+**Sharing one file broke three storage paths that counted rows.** A bout clip is referenced
+by every detection in it, including detections of other species heard in the same passage.
+`clipsBytesTotal` summed per row and so multiplied a shared file's bytes by its row count,
+driving the cap to prune audio that was never over it; `clipsCount` reported a dozen clips
+where there was one; and `pruneToCapBytes` deleted a file while nulling only one of the
+rows naming it, leaving the rest advertising a clip that 404s. All three are now keyed on
+distinct `clip_path`, and a file is pinned if *any* of its rows is pinned — the lifer is
+the audio, not the row that happens to name it.
+
+**Storage was modelled, not guessed.** The 19 h corpus is the only measured clip-rate
+evidence available: 266 windows cleared the 0.50 clip floor, ~96 MB/day as 3 s files, which
+8 GB held for ~85 days. The same triggers as bout clips are 202 files averaging ~12 s,
+~306 MB/day, which 8 GB would hold for only ~27 days. Two assumptions are stated in the
+constant because they move the number: that corpus is indoor and known-negative so its
+triggers are isolated, making it the *worst* case for bout merging and a conservative basis
+for sizing; and the phone reports >100 GB free, so the cap is a cap and not a reservation.
+16 GB gives ~54 days at the modelled worst case, comfortably more than the few weeks a
+verification backlog actually needs.
 
 ### 11n. Measured performance
 

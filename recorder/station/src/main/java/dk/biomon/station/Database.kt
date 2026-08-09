@@ -24,8 +24,12 @@ data class NewDetection(
     val detectorVersion: String,
     val scoreType: String,
     val confidence: Float,
+    /** All three are null/zero at insert time and filled in later by [Database.attachClip].
+     *  A bout clip cannot exist when its first window is scored — it runs on past the
+     *  trigger — so the row is written first and the audio catches up. See BoutRecorder. */
     val clipPath: String?,
     val clipSeconds: Double,
+    val clipStartMs: Long? = null,
     val taxonRegional: Boolean = true,
     val taxonInSeason: Boolean = true
 )
@@ -36,12 +40,14 @@ data class DetectionRow(
     val detector: String, val detectorVersion: String, val scoreType: String,
     val confidence: Float, val clipPath: String?, val clipSeconds: Double,
     val repeatCount: Int, val state: String,
+    val clipStartMs: Long? = null,
     val taxonRegional: Boolean = true, val taxonInSeason: Boolean = true
 ) {
     fun toDetection(): Detection = Detection(
         id = id, detectedAtMs = detectedAtMs, windowStartMs = detectedAtMs, windowMs = windowMs,
         taxon = taxon, detector = detector, detectorVersion = detectorVersion, scoreType = scoreType,
         confidence = confidence, clipPath = clipPath, clipSeconds = clipSeconds,
+        clipStartMs = clipStartMs,
         state = state, repeatCount = repeatCount, regional = taxonRegional, inSeason = taxonInSeason
     )
 }
@@ -60,7 +66,7 @@ data class DaySummaryData(
  * (API.md §1 "Field rules that matter"). Rows below `retentionFloor` are never written
  * at all; that is the one setting applied at WRITE time, and the asymmetry is by design.
  */
-class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station.db", null, 5) {
+class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station.db", null, 6) {
 
     /**
      * The life list, its evidence, and the local-occurrence prior.
@@ -146,7 +152,13 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
                 score_type TEXT NOT NULL,
                 confidence REAL NOT NULL,
                 clip_path TEXT,
-                clip_seconds REAL NOT NULL
+                clip_seconds REAL NOT NULL,
+                -- Wall-clock start of the clip's AUDIO, which is earlier than
+                -- detected_at_ms by the pre-roll. Lets a player seek to where this
+                -- detection actually sits inside a bout clip instead of starting at 0.
+                -- Null for rows written before bout clips existed, and for rows whose
+                -- clip was never finished.
+                clip_start_ms INTEGER
             )
         """.trimIndent())
         db.execSQL("CREATE INDEX idx_det_taxon_time ON detections(taxon_key, detected_at_ms)")
@@ -219,6 +231,39 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             db.execSQL("DELETE FROM detections WHERE $whereKey")
         }
         if (oldVersion < 5) createLifeList(db)
+        if (oldVersion < 6) {
+            // Bout clips (BoutRecorder): a clip now starts before its trigger, so where the
+            // detection sits inside it has to be stored rather than assumed to be zero.
+            //
+            // PURELY ADDITIVE, AND THAT IS THE POINT. Read the v4 note above: every
+            // migration from v5 onward must preserve pinnedDetectionIds(), and the surest
+            // way to preserve them is to delete nothing at all. This migration touches no
+            // rows and no clip files. Existing rows keep clip_start_ms = NULL, which the
+            // API reports as "unknown offset" — the honest answer for a 3 s window clip
+            // written before any of this existed, rather than a fabricated zero.
+            db.execSQL("ALTER TABLE detections ADD COLUMN clip_start_ms INTEGER")
+        }
+    }
+
+    /**
+     * Attach a finished bout clip to every row that triggered it.
+     *
+     * This is the second half of the deferred write BoutRecorder documents: the rows were
+     * inserted with no clip because the audio was still being recorded. One file is shared
+     * by every detection in the bout, including detections of different species heard in
+     * the same passage — which is correct, they are one piece of audio — and is why the
+     * storage paths below count and prune by DISTINCT clip_path rather than by row.
+     */
+    fun attachClip(ids: List<Long>, path: String, seconds: Double, startedAtMs: Long): Int {
+        if (ids.isEmpty()) return 0
+        val cv = ContentValues().apply {
+            put("clip_path", path)
+            put("clip_seconds", seconds)
+            put("clip_start_ms", startedAtMs)
+        }
+        val placeholders = ids.joinToString(",") { "?" }
+        return writableDatabase.update("detections", cv, "id IN ($placeholders)",
+            ids.map { it.toString() }.toTypedArray())
     }
 
     fun insert(d: NewDetection): Long {
@@ -240,6 +285,7 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             put("confidence", d.confidence)
             put("clip_path", d.clipPath)
             put("clip_seconds", d.clipSeconds)
+            put("clip_start_ms", d.clipStartMs)
         }
         return writableDatabase.insert("detections", null, cv)
     }
@@ -392,9 +438,11 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         fun f(n: String) = c.getFloat(c.getColumnIndexOrThrow(n))
         val taxon = Taxon(s("taxon_key"), s("taxon_scientific"), s("taxon_common"),
             s("taxon_group"), s("taxon_rank"), i("taxon_model_index"))
+        val startIdx = c.getColumnIndex("clip_start_ms")
         return NewDetection(l("detected_at_ms"), i("window_ms"), taxon, s("detector"),
             s("detector_version"), s("score_type"), f("confidence"),
             c.getString(c.getColumnIndexOrThrow("clip_path")), c.getDouble(c.getColumnIndexOrThrow("clip_seconds")),
+            clipStartMs = if (startIdx >= 0 && !c.isNull(startIdx)) c.getLong(startIdx) else null,
             taxonRegional = i("taxon_regional") != 0, taxonInSeason = i("taxon_in_season") != 0)
     }
 
@@ -405,6 +453,7 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             val d = rowFrom(c)
             out += DetectionRow(id, d.detectedAtMs, d.windowMs, d.taxon, d.detector, d.detectorVersion,
                 d.scoreType, d.confidence, d.clipPath, d.clipSeconds, repeatCount = 0, state = "candidate",
+                clipStartMs = d.clipStartMs,
                 taxonRegional = d.taxonRegional, taxonInSeason = d.taxonInSeason)
         }
         return out
@@ -590,21 +639,39 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             }.sortedByDescending { it.count }
     }
 
+    // DISTINCT, everywhere, since bout clips arrived. One clip file is shared by every
+    // detection in the bout — a singing bird produces a dozen rows against one file, and
+    // a mixed passage adds rows for other species against that same file. Counting rows
+    // would report a dozen clips where there is one, and summing per row would multiply
+    // that file's bytes by a dozen, driving the storage cap to prune audio that was never
+    // over the cap in the first place.
     fun clipsBytesTotal(): Long {
-        val c = readableDatabase.rawQuery("SELECT clip_path FROM detections WHERE clip_path IS NOT NULL", null)
+        val c = readableDatabase.rawQuery(
+            "SELECT DISTINCT clip_path FROM detections WHERE clip_path IS NOT NULL", null)
         var total = 0L
         c.use { while (it.moveToNext()) total += File(it.getString(0)).let { f -> if (f.exists()) f.length() else 0L } }
         return total
     }
 
     fun clipsCount(): Int {
-        val c = readableDatabase.rawQuery("SELECT COUNT(*) FROM detections WHERE clip_path IS NOT NULL", null)
+        val c = readableDatabase.rawQuery(
+            "SELECT COUNT(DISTINCT clip_path) FROM detections WHERE clip_path IS NOT NULL", null)
         return c.use { if (it.moveToFirst()) it.getInt(0) else 0 }
     }
 
-    /** Deletes clip FILES oldest-first until under [capBytes], nulling clip_path in the
-     *  row (never deletes the detection itself — API.md: "clip may be null for a
-     *  candidate whose clip was pruned by the storage cap"). Returns rows pruned. */
+    /**
+     * Deletes clip FILES oldest-first until under [capBytes], nulling clip_path on every
+     * row that referenced the deleted file (never deletes the detection itself — API.md:
+     * "clip may be null for a candidate whose clip was pruned by the storage cap").
+     * Returns the number of FILES deleted.
+     *
+     * BY FILE, NOT BY ROW, since bout clips arrived. Deleting a file while nulling only
+     * one of the rows that point at it would leave every other row in that bout referencing
+     * a path that no longer exists — a clip the API still advertises and that 404s when
+     * played, which is precisely the "confident, plausible-looking output from a partial
+     * failure" §2d is about. A file is pinned if ANY of its rows is pinned, for the same
+     * reason: the lifer is the audio, not the row that happens to name it.
+     */
     fun pruneToCapBytes(capBytes: Long): Int {
         var total = clipsBytesTotal()
         if (total <= capBytes) return 0
@@ -612,18 +679,27 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         // met by deleting pinned audio, the cap loses: a life list with missing evidence is
         // worth less than the disk space it would free.
         val pinned = pinnedDetectionIds()
+        val pinnedPaths = HashSet<String>()
+        if (pinned.isNotEmpty()) {
+            readableDatabase.rawQuery(
+                "SELECT DISTINCT clip_path FROM detections WHERE clip_path IS NOT NULL AND id IN " +
+                "(${pinned.joinToString(",")})", null
+            ).use { while (it.moveToNext()) pinnedPaths.add(it.getString(0)) }
+        }
+        // Oldest FILE first, ordered by the earliest detection that references it.
         val c = readableDatabase.rawQuery(
-            "SELECT id, clip_path FROM detections WHERE clip_path IS NOT NULL ORDER BY detected_at_ms ASC", null)
+            "SELECT clip_path, MIN(detected_at_ms) AS first_ms FROM detections " +
+            "WHERE clip_path IS NOT NULL GROUP BY clip_path ORDER BY first_ms ASC", null)
         var pruned = 0
         c.use {
             while (it.moveToNext() && total > capBytes) {
-                val id = it.getLong(0); val path = it.getString(1)
-                if (id in pinned) continue
+                val path = it.getString(0)
+                if (path in pinnedPaths) continue
                 val f = File(path)
                 val sz = if (f.exists()) f.length() else 0L
                 if (f.exists()) f.delete()
                 writableDatabase.update("detections", ContentValues().apply { putNull("clip_path") },
-                    "id = ?", arrayOf(id.toString()))
+                    "clip_path = ?", arrayOf(path))
                 total -= sz
                 pruned++
             }
@@ -860,7 +936,7 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             readableDatabase.rawQuery(sql, null).use { if (it.moveToFirst()) it.getInt(0) else 0 }
         return ClearPreview(
             detections = count("SELECT COUNT(*) FROM detections"),
-            clips = count("SELECT COUNT(*) FROM detections WHERE clip_path IS NOT NULL"),
+            clips = count("SELECT COUNT(DISTINCT clip_path) FROM detections WHERE clip_path IS NOT NULL"),
             confirmedSpecies = count("SELECT COUNT(*) FROM species_status WHERE status = 'confirmed'"),
             pinnedClips = pinnedDetectionIds().size
         )
@@ -875,12 +951,23 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
      */
     fun clearAll(keepLifeList: Boolean = true) {
         val pinned = if (keepLifeList) pinnedDetectionIds() else emptySet()
+        // A file is spared if ANY row referencing it is pinned. A bout clip is shared, so
+        // checking row-by-row would delete the audio behind a lifer as soon as some other
+        // detection in the same passage was unpinned — see pruneToCapBytes for the same rule.
+        val pinnedPaths = HashSet<String>()
+        if (pinned.isNotEmpty()) {
+            readableDatabase.rawQuery(
+                "SELECT DISTINCT clip_path FROM detections WHERE clip_path IS NOT NULL AND id IN " +
+                "(${pinned.joinToString(",")})", null
+            ).use { while (it.moveToNext()) pinnedPaths.add(it.getString(0)) }
+        }
         readableDatabase.rawQuery(
-            "SELECT id, clip_path FROM detections WHERE clip_path IS NOT NULL", null
+            "SELECT DISTINCT clip_path FROM detections WHERE clip_path IS NOT NULL", null
         ).use {
             while (it.moveToNext()) {
-                if (it.getLong(0) in pinned) continue
-                runCatching { File(it.getString(1)).delete() }
+                val path = it.getString(0)
+                if (path in pinnedPaths) continue
+                runCatching { File(path).delete() }
             }
         }
         if (pinned.isEmpty()) {
