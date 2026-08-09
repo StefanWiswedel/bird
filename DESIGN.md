@@ -982,6 +982,27 @@ its own measurement.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-08-09) **The day list is rolled up by species, and the bout becomes the unit of
+  judgement** (§11o). Two changes that turned out to be one. PR 1 left a mismatch:
+  `countBouts` merges detections within `bout_gap_s` (60 s) while `BoutRecorder` closes a
+  recording after 4 s of silence, so a bird calling every twenty seconds is **one bout and
+  three clips**. Resolved in favour of the evidence unit — the bout stays the thing being
+  judged and now owns an *ordered list* of clips, played back to back as one listening
+  experience with the seam shown rather than the dropped silence reinserted. Pinning and
+  pruning were re-checked against that: pinning a detection now pins every clip of its
+  bout, because half a bout is evidence that starts mid-phrase. A bout with no clips is
+  five different situations and `audio.state` names them — `recorded` / `partial` /
+  `pending` / `none` / `unavailable` — because `pending` is a state that did not exist
+  before bout clips and is the one most easily rendered as "no audio" when it means "not
+  finished yet" (§2d). On top of that the day list is now one row per species per day,
+  which is how a day list is actually kept: bouts as the headline number (a detection count
+  mostly measures how long something sang near the mic, and neither number is a bird
+  count), with peak confidence and how many bouts cleared `effectiveThreshold` carried into
+  the row so "37 bouts" cannot read as fact when all 37 are marginal. Each row carries a
+  six-period activity strip **anchored to sunrise and sunset rather than the clock** —
+  Copenhagen sunrise moves 04:26→08:37 across the year, so fixed bins would smear one dawn
+  chorus across different columns and destroy the pattern; solar times are computed
+  on-device from the station's coordinates, no network and no dependency.
 - (2026-08-09) **Clips are bouts now, with pre-roll and post-roll** (§11m). The station
   stored exactly the 3.0 s model window. Three seconds is what BirdNET needs and it is not
   what a person needs: identification by ear runs on rhythm, repetition and phrase
@@ -2059,6 +2080,66 @@ triggers are isolated, making it the *worst* case for bout merging and a conserv
 for sizing; and the phone reports >100 GB free, so the cap is a cap and not a reservation.
 16 GB gives ~54 days at the modelled worst case, comfortably more than the few weeks a
 verification backlog actually needs.
+
+### 11o. The bout as the unit of judgement, and the day list as a species list
+
+**§11m created a mismatch and this resolves it.** `countBouts` groups detections separated
+by less than `bout_gap_s` (60 s); `BoutRecorder` closes a recording 4 s after the last
+detection. Both are right — they answer different questions, which is exactly why they were
+given different constants — but together they mean a bird calling every twenty seconds is
+**one bout and three clips**. The verification design assumed one bout, one clip, one
+judgement, and that no longer holds.
+
+Resolved in favour of the evidence unit. **The bout stays the thing being judged**, and it
+owns an ordered list of clips rather than a single path. Playback runs them back to back as
+one listening experience. The silence between clips is *not* reinserted — it was
+deliberately never recorded — but the seam is drawn, one bar per file with a real gap
+between them, so the jump reads as a seam rather than as a glitch or as the bird changing.
+
+**Five answers, not two.** An empty clip list means five different things and collapsing
+them into "no audio" is §2d in its most concrete form:
+
+| `audio.state` | what happened |
+|---|---|
+| `recorded` | every detection meant to have audio has it |
+| `partial` | pruning takes whole files, so a multi-clip bout can lose its beginning and keep its end |
+| `pending` | the station may still be writing it — **this is not "none"** |
+| `none` | nothing here ever cleared the clip floor |
+| `unavailable` | recorded and gone: pruned, or the write failed |
+
+`pending` is the state that did not exist before bout clips. It is the one a UI renders as
+"no audio" by accident, and the resulting bug looks like a fault in the recorder rather
+than in the display — so the API names it and the dashboard prints "recording still being
+written" against it. Pruned and failed are deliberately not separated: nothing on the row
+records which happened, and `storage.clips_failed` answers the actionable half.
+
+**Pinning had to follow the bout.** `pinnedClipPaths` now expands each pinned detection to
+its whole bout and pins every clip in it. Pinning only the file the pinned row happens to
+sit in would let the cap delete the rest of the same bout, leaving a lifer's evidence
+starting halfway through a phrase — audible and wrong, which is worse than obviously
+missing.
+
+**The day list is a species list.** One row per species per day, which is how a day list is
+kept, instead of five hundred magpie rows. Expanding a row reveals its bouts; expanding is
+also where the audio is, because a bout is several files.
+
+- **Bouts are the headline number, and neither number is a bird count.** A detection count
+  mostly measures how long something sang near the microphone: one magpie on the railing
+  for ten minutes outscores five magpies passing through. Both are shown and both are
+  labelled, so neither can be read as a count of birds.
+- **The evidence travels with the count.** "Magpie — 37 bouts" reads as fact even when all
+  37 are marginal, and the committed corpus is 5,499 rows of exactly that. The row carries
+  peak confidence, the threshold it had to clear, and how many bouts actually cleared it.
+- **The activity strip is anchored to the sun, not the clock.** Copenhagen sunrise moves
+  from about 04:26 in June to 08:37 in December — over four hours — so fixed clock bins
+  smear one dawn chorus across different columns through the year and destroy the pattern
+  the strip exists to show. `Solar.kt` computes sunrise, sunset and civil twilight on-device
+  from the station's coordinates (the standard sunrise equation, no network, no dependency;
+  verified against published Copenhagen solstice times to within a minute). Six coarse
+  periods, full width, no 24-column grid: this is read on a phone, a strip scales to any
+  width without horizontal scroll, and six bins cannot imply hourly precision that a handful
+  of bouts does not have. When the sun never crosses a threshold the edges are interpolated
+  and `solar: false` says so rather than presenting a guess as astronomy.
 
 ### 11n. Measured performance
 

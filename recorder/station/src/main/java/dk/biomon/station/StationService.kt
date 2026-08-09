@@ -392,7 +392,9 @@ class StationService : Service(), HealthProvider {
         scope.launch {
             while (true) {
                 kotlinx.coroutines.delay(10 * 60_000L)
-                runCatching { db.pruneToCapBytes(CLIP_CAP_BYTES) }
+                // Settings are read fresh each tick: pruning now needs boutGapSeconds to
+                // work out which whole BOUTS are pinned, not just which files.
+                runCatching { db.pruneToCapBytes(CLIP_CAP_BYTES, settingsStore.get()) }
             }
         }
     }
