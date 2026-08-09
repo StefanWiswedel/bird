@@ -849,7 +849,8 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
     )
 
     /** Every bout of one species across all days, newest first. */
-    fun boutsForSpecies(taxonKey: String, settings: Settings, limit: Int = 300): List<Bout> {
+    fun boutsForSpecies(taxonKey: String, settings: Settings, limit: Int = 300,
+                        learned: Map<String, Float>? = null): List<Bout> {
         val c = readableDatabase.rawQuery(
             "SELECT * FROM detections WHERE taxon_key = ? AND confidence >= ? " +
             "AND taxon_group != 'non_taxon' AND taxon_key NOT IN ($NON_TAXON_KEYS_SQL) " +
@@ -858,8 +859,10 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         val rows = c.use { readRows(it) }
         if (rows.isEmpty()) return emptyList()
         val prior = priorsForWeek(weekOf(rows.first().detectedAtMs))[rows.first().taxon.scientific]
+        // The caller passes `learned` when it is iterating species, so the calibration pass
+        // runs once for the whole triage list rather than once per species.
         return boutsOf(rows, settings, speciesThresholdOverrides(), prior,
-            System.currentTimeMillis(), learnedThresholds()).take(limit)
+            System.currentTimeMillis(), learned ?: learnedThresholds()).take(limit)
     }
 
     /**
@@ -1228,6 +1231,7 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             }
         }
         val overrides = speciesThresholdOverrides()
+        val learned = learnedThresholds()
         val gapMs = settings.boutGapSeconds * 1000L
         // A rejected species stops counting toward the day's totals for the same reason it
         // leaves the species list: the observer already answered the question these numbers
@@ -1247,7 +1251,12 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
                 val bouts = countBouts(forTaxon.map { it.atMs }.sorted(), gapMs)
                 if (bouts < settings.repeatRequired) emptyList()
                 else forTaxon.filter {
-                    it.confidence >= effectiveThreshold(it.taxonKey, it.regional, it.inSeason, settings, overrides)
+                    // Learned thresholds are passed here too. This function exists because
+                    // /api/days and /api/species once disagreed about the same day, and
+                    // curating one of them under a different bar would recreate exactly
+                    // that — two endpoints describing one day and contradicting each other.
+                    it.confidence >= effectiveThreshold(it.taxonKey, it.regional, it.inSeason,
+                        settings, overrides, learned = learned)
                 }
             }
             DaySummary(date, confirmed.size, confirmed.map { it.taxonKey }.distinct().size)
