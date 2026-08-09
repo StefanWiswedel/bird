@@ -116,6 +116,8 @@ this is a LAN appliance the user opens from whatever device is to hand.
 | GET | `/api/detections` | detection list, newest first |
 | GET | `/api/summary` | one day's rollup |
 | GET | `/api/days` | dates that have data, for history navigation |
+| GET | `/api/day/species` | one day rolled up by species — the day list |
+| GET | `/api/day/bouts` | the bouts of one species on one day, with their clips |
 | GET | `/api/species` | distinct taxa seen, with photo + counts |
 | GET | `/api/clip/{id}` | `audio/wav`, supports `Range` — the whole bout, not one window |
 | GET | `/api/live-audio` | most recent 3 s raw window as `audio/wav`, not a stored clip |
@@ -235,6 +237,126 @@ and unrelated to `/api/clip/{id}`. `404` until the first window lands after capt
 starts. The response carries `X-Window-Ms: <start_ms>` so a poller can tell a genuinely
 new window from one it already drew (two polls landing inside the same 1.5 s hop would
 otherwise redraw an identical frame).
+
+---
+
+## 2b. Bouts, and the bout→clip relationship
+
+**A bout is the unit of evidence and the unit a person judges. A clip is a file.** They are
+not the same thing and do not correspond one-to-one. This is the contract the verification
+flow is built on, so it is stated here rather than left to be inferred.
+
+- A **bout** is a run of detections of one taxon with no gap longer than
+  `settings.bout_gap_s` (60 s by default). That is a question about *evidence*: are these
+  the same event?
+- A **clip** is one recording. `BoutRecorder` closes a recording ~4 s after the last
+  detection in it. That is a question about *listening*: is it worth storing the silence
+  between two calls? Sixty seconds of silence inside a file is not evidence, it is dead air.
+
+So **one bout may own several clips, in time order** — a bird calling every twenty seconds
+is one bout and three recordings — and, separately, **one clip may serve several
+detections**, including detections of different species heard in the same passage.
+
+A player must run a bout's clips **back to back as one listening experience**, and must
+**not** reinsert the silence between them: that silence was deliberately never recorded.
+It should, however, make the seam visible, so the jump in the audio reads as a seam rather
+than as a glitch or as the bird changing.
+
+Pinning and pruning work at bout granularity for the same reason: pinning a detection pins
+every clip of its bout, because half a bout is evidence that begins mid-phrase.
+
+### `bout.audio.state` — five answers, and only one of them is "nothing"
+
+| state | meaning |
+|---|---|
+| `recorded` | every detection meant to have audio has it |
+| `partial` | some do, some do not — pruning takes whole files, so a multi-clip bout can lose its beginning and keep its end |
+| `pending` | recent enough that the station may still be writing it. **Not** "no audio" |
+| `none` | nothing here ever cleared `clip_floor`, so no audio was ever recorded |
+| `unavailable` | audio was recorded and is gone: pruned by the cap, or the write failed |
+
+`pending` is the one that did not exist before bout clips, and the one most easily rendered
+as "no audio" when it means "not finished yet" — §2d in its most concrete form. A client
+must distinguish it; `covered_detections` / `expected_detections` say how much of the bout
+survives when the answer is `partial`.
+
+`pruned` and a failed write are deliberately not separated: both leave `clip_path` NULL and
+nothing on the row records which happened. The station-level `storage.clips_failed` counter
+says whether writes are failing at all, which is the actionable half.
+
+### `GET /api/day/species?date=YYYY-MM-DD`
+
+One row per species per day — the unit a birder keeps, instead of five hundred magpie rows.
+
+```json
+{
+  "schema": 1, "date": "2026-08-09", "server_ms": 1785640470123, "count": 17,
+  "activity_bins": {
+    "labels": ["night","dawn","morning","afternoon","dusk","late"],
+    "edges_ms": [ … 7 values … ],
+    "sunrise_ms": …, "sunset_ms": …, "civil_dawn_ms": …, "civil_dusk_ms": …, "solar": true
+  },
+  "species": [
+    { "taxon": { … }, "bouts": 32, "bouts_above_threshold": 21, "detections": 47,
+      "first_ms": …, "last_ms": …, "peak_confidence": 0.99, "threshold": 0.65,
+      "best_bout_id": 4127, "best_clip": { … }, "activity": [0,4,11,9,5,3],
+      "species_status": "candidate", "photo": { … } }
+  ],
+  "station": { … }
+}
+```
+
+- **`bouts` is the headline number, and it is not a bird count.** A detection count mostly
+  measures how long something sang near the microphone: one magpie on the railing for ten
+  minutes outscores five magpies passing through. `detections` is carried too; the UI must
+  label both so neither reads as a number of birds.
+- **`bouts_above_threshold` and `peak_confidence` travel with the count on purpose.**
+  "Magpie — 37 bouts" reads as fact even when all 37 are marginal, and the committed
+  known-negative corpus is 5,499 rows of exactly that.
+- **`activity` is six counts of BOUTS**, one per bin in `activity_bins`.
+  **The bins are anchored to the sun, not the clock**: Copenhagen sunrise moves from about
+  04:26 in June to 08:37 in December, so fixed clock bins would smear one dawn chorus
+  across different columns through the year. Computed on-device from the station's
+  coordinates — no network, no dependency. `solar` is `false` when the sun never crossed a
+  threshold and the edges are interpolated instead of observed; the strip still renders,
+  but it is not a solar strip and says so.
+- `best_clip` is the highest-confidence bout **that actually has audio** — the point is a
+  one-tap listen, and a higher-scoring bout with no clip is not a better thing to offer
+  someone whose next action is to press play.
+
+### `GET /api/day/bouts?date=YYYY-MM-DD&taxon_key=…`
+
+The bouts behind one species row. Separate from the rollup because a day of bouts with
+their clips is far more than a list view needs up front.
+
+```json
+{
+  "schema": 1, "date": "2026-08-09", "taxon_key": "turdus_merula", "count": 32,
+  "bouts": [
+    { "bout_id": 4127, "taxon": { … },
+      "start_ms": …, "end_ms": …, "seconds": 68.0,
+      "detections": 15, "detection_ids": [4127, 4131, …],
+      "peak_confidence": 0.84, "threshold": 0.65, "above_threshold": true,
+      "clips": [
+        { "url": "/api/clip/4127", "detection_id": 4127, "seconds": 12.0,
+          "starts_at_ms": …, "mime": "audio/wav" },
+        { "url": "/api/clip/4139", "detection_id": 4139, "seconds": 33.0,
+          "starts_at_ms": …, "mime": "audio/wav" }
+      ],
+      "audio": { "state": "recorded", "seconds": 45.0,
+                 "covered_detections": 15, "expected_detections": 15 } }
+  ]
+}
+```
+
+`bout_id` is the id of the bout's **first detection**. It is derived, not stored, because
+curation stays a read-time operation: change `bout_gap_s` and bouts legitimately merge or
+split, and the ids move with them. It is stable for as long as that setting is.
+
+A clip's `url` is keyed on a detection id because that is what `/api/clip/{id}` serves; it
+is not an identity for the clip. Two clips of one bout necessarily carry different ids.
+
+---
 
 ### `GET/POST /api/settings`
 

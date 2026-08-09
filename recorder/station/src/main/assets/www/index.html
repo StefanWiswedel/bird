@@ -246,6 +246,40 @@ main { max-width: 640px; margin: 0 auto; padding: var(--space-24) var(--space-16
    failure to keep audio must not read as something exciting. */
 .tag.is-warn { color: var(--ember); border-color: var(--ember); }
 
+/* ------------------------------------------------- day list: species rollup
+   ACTIVITY STRIP. Six solar-anchored periods across the full width of the row, not a
+   24-column grid: this is read on a phone, and a strip scales to any width with no
+   horizontal scroll and cannot imply hourly precision the data does not have. */
+.strip { display: flex; gap: 2px; margin-top: var(--space-8); }
+.strip i { flex: 1 1 0; height: 6px; border-radius: 1px; background: var(--ember); }
+.strip-key {
+  display: flex; margin-top: var(--space-4);
+  font-size: var(--text-11); letter-spacing: var(--tracking-label);
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.strip-key span { flex: 1 1 0; text-align: center; }
+.sp-nums { display: flex; gap: var(--space-12); flex-wrap: wrap; align-items: baseline; }
+
+.bout { border-top: 1px solid var(--line); padding: var(--space-12) 0; }
+.bout:first-child { border-top: none; }
+.bout-head { display: flex; align-items: center; gap: var(--space-12); }
+.bout-head .grow { flex: 1; }
+/* Sized to content, unlike .det-time's fixed 6ch — a bout's range runs to seventeen
+   characters and would otherwise overrun the column beside it. */
+.bout-head .bout-when {
+  font-family: var(--font-data); font-variant-numeric: tabular-nums;
+  font-size: var(--text-13); color: var(--ink-soft); white-space: nowrap;
+}
+.bout .note { margin-top: var(--space-4); }
+/* SEAM. One bar per clip file, width proportional to its duration, with a real gap
+   between them. The gap is the point: a bout can be several recordings and the silence
+   between them was deliberately never recorded, so playback jumps — shown, so the jump
+   reads as a seam rather than as a glitch or a second bird. */
+.seam { display: flex; gap: var(--space-8); margin-top: var(--space-8); height: 8px; }
+.seam i { background: var(--line-strong); border-radius: 2px; position: relative; overflow: hidden; }
+.seam i.is-playing { background: var(--ember-dim); }
+.seam i b { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--ember); }
+
 .det-detail { display: none; padding: 0 0 var(--space-16) calc(6ch + var(--space-12)); }
 .det.is-open .det-detail { display: flex; flex-direction: column; gap: var(--space-12); }
 .det-detail audio { width: 100%; height: var(--space-32); }
@@ -681,9 +715,12 @@ footer { text-align: center; padding: var(--space-32) var(--space-16); }
       <div class="note" id="heatNote" style="margin-top:var(--space-8)"></div>
     </div>
 
-    <div class="label eyebrow">Top species</div>
-    <div class="feed" id="dayTop"></div>
-    <div class="empty hidden" id="dayTopEmpty">Nothing recorded on this day.</div>
+    <!-- The day list, rolled up by species — the unit a birder actually keeps, and the
+         reason this is not five hundred magpie rows. -->
+    <div class="label eyebrow">Species heard</div>
+    <div class="feed" id="daySpecies"></div>
+    <div class="empty hidden" id="daySpeciesEmpty">Nothing recorded on this day.</div>
+    <div class="note" id="dayLegend" style="margin-top:var(--space-12)"></div>
 
     <div class="note" id="weatherLine" style="margin-top:var(--space-16)"></div>
   </section>
@@ -2426,14 +2463,7 @@ async function loadDaySummary() {
   $("hourChart").innerHTML = s.by_hour.map(c =>
     `<i style="height:${Math.max(2, Math.round(100 * c / max))}%;opacity:${c ? 1 : 0.15}" title="${c}"></i>`).join("");
 
-  $("dayTop").innerHTML = s.top.map(row => `<div class="det">
-      <div class="det-summary" style="cursor:default">
-        <span class="det-time">${fmtClock(row.last_ms)}</span>
-        ${thumbHtml(null, row.taxon.key)}
-        <span class="taxon">${taxonHtml(row.taxon)}</span>
-        <span class="n data">${row.count}&times;</span>
-      </div></div>`).join("");
-  $("dayTopEmpty").classList.toggle("hidden", s.top.length > 0);
+  await loadDaySpecies();
 
   const wl = $("weatherLine");
   // Weather needs the internet and the station must work without it — absence is
@@ -2441,6 +2471,207 @@ async function loadDaySummary() {
   wl.innerHTML = s.weather
     ? `<span class="data">${s.weather.temperature_c}°C</span> · wind <span class="data">${s.weather.wind_ms}</span> m/s · cloud <span class="data">${s.weather.cloud_pct}</span>% · via ${esc(s.weather.source)}`
     : "Weather unavailable.";
+}
+
+/* =============================================================================
+   7b. THE DAY LIST, BY SPECIES
+
+   One row per species per day — the unit a birder keeps, and the unit that makes a day
+   of five hundred magpie detections readable. Expanding a row reveals its BOUTS, which
+   are the unit of evidence and the unit a person judges; expanding is also where the
+   audio lives, because a bout can be several clip files.
+   ========================================================================== */
+
+/* THE HEADLINE NUMBER IS BOUTS, NOT DETECTIONS, and neither is a bird count.
+   A detection count mostly measures how long something sang near the microphone — one
+   magpie on the railing for ten minutes outscores five magpies passing through — so the
+   label says "bouts" and the legend says what that means. */
+function speciesRowHtml(s, bins) {
+  const peak = Math.max(1, ...s.activity);
+  const strip = s.activity.map((c, i) =>
+    // Opacity over --ember, the same single-token idiom the day heatmap uses; an empty
+    // period still shows faintly so the strip reads as a strip and not as a gap.
+    `<i style="opacity:${c ? (0.2 + 0.8 * c / peak).toFixed(3) : 0.07}"
+        title="${esc(bins.labels[i])}: ${c} bout(s)"></i>`).join("");
+  // Evidence travels with the count. "Magpie — 37 bouts" reads as fact even when all 37
+  // are marginal, and the known-negative corpus is 5,499 rows of exactly that.
+  const above = s.bouts_above_threshold;
+  const marginal = s.bouts - above;
+  return `<div class="det sp-row" data-taxon-key="${esc(s.taxon.key)}">
+    <button type="button" class="det-summary">
+      <span class="det-time">${fmtClock(s.first_ms)}</span>
+      ${thumbHtml(s.photo, s.taxon.key)}
+      <span class="taxon">
+        ${taxonHtml(s.taxon)}
+        <span class="n">${s.bouts} bout${s.bouts === 1 ? "" : "s"}${
+          marginal > 0 ? ` · <span class="data">${above}</span> over threshold` : ""}</span>
+      </span>
+      <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+    <div class="strip" role="img" aria-label="Activity through the day">${strip}</div>
+    <div class="det-detail">
+      <div class="sp-nums note">
+        <span>peak <span class="data">${fmtScore(s.peak_confidence)}</span></span>
+        <span>threshold <span class="data">${fmtScore(s.threshold)}</span></span>
+        <span><span class="data">${s.detections}</span> windows</span>
+        <span>${esc(fmtClock(s.first_ms))}–${esc(fmtClock(s.last_ms))}</span>
+      </div>
+      <div class="bouts"><span class="note">Loading bouts…</span></div>
+    </div>
+  </div>`;
+}
+
+/* A bout's audio is not always a file. Each of these means something different and only
+   one of them means "there was nothing here" — §2d, and the reason BoutAudio exists. */
+const AUDIO_STATE_NOTE = {
+  pending: "Recording still being written — check back in a minute.",
+  none: "No audio: nothing in this bout reached the clip floor.",
+  unavailable: "Audio no longer on the station — pruned by the storage cap, or the write failed.",
+};
+
+function boutHtml(b) {
+  const total = b.clips.reduce((a, c) => a + c.seconds, 0);
+  const seam = b.clips.map(c =>
+    `<i style="flex:${Math.max(1, c.seconds)} 1 0"><b></b></i>`).join("");
+  const when = `${fmtClockSec(b.start_ms)}${b.end_ms > b.start_ms ? "–" + fmtClockSec(b.end_ms) : ""}`;
+  const evidence = `<span class="data">${fmtScore(b.peak_confidence)}</span> peak · ${
+    b.above_threshold ? "over" : "under"} <span class="data">${fmtScore(b.threshold)}</span> · ${
+    b.detections} window${b.detections === 1 ? "" : "s"}`;
+
+  // Two lines, not one: a bout's time range is up to seventeen characters and the
+  // evidence line is longer still, so a single flex row collides on a phone.
+  if (!b.clips.length) {
+    return `<div class="bout" data-bout="${b.bout_id}">
+      <div class="bout-head"><span class="bout-when">${esc(when)}</span></div>
+      <div class="note">${esc(AUDIO_STATE_NOTE[b.audio.state] || "No audio for this bout.")}</div>
+      <div class="note">${evidence}</div>
+    </div>`;
+  }
+  // "partial" is its own sentence: pruning takes whole files, so a multi-clip bout can
+  // lose its beginning and keep its end, and playing what is left as though it were the
+  // whole bout is the quiet kind of wrong.
+  const partial = b.audio.state === "partial"
+    ? `<div class="note" style="margin-top:var(--space-4)"><span class="tag is-warn">partial</span>
+       ${b.audio.covered_detections} of ${b.audio.expected_detections} recordings survive; the rest were pruned.</div>`
+    : "";
+  const seamNote = b.clips.length > 1
+    ? `<div class="note" style="margin-top:var(--space-4)">${b.clips.length} recordings, played back to back.
+       The gaps are silence that was never recorded, not a cut.</div>`
+    : "";
+  return `<div class="bout" data-bout="${b.bout_id}">
+    <div class="bout-head">
+      <button type="button" class="btn is-quiet bout-play" aria-label="Play this bout">▶</button>
+      <span class="bout-when">${esc(when)}</span>
+      <span class="grow"></span>
+      <span class="note data">${fmtDur(total)}</span>
+    </div>
+    <div class="seam">${seam}</div>
+    <div class="note">${evidence}</div>
+    ${seamNote}${partial}
+  </div>`;
+}
+
+function fmtDur(s) { return s >= 60 ? `${Math.floor(s / 60)}:${pad2(Math.round(s % 60))}` : `${Math.round(s)}s`; }
+
+/* ONE bout, played as ONE listening experience even when it is several files.
+   Clips run back to back with no silence reinserted — the gaps were dropped on purpose —
+   and the seam bar shows which recording is playing so the jump reads as a seam. */
+function playBout(boutEl, bout) {
+  stopBoutAudio();
+  const bars = [...boutEl.querySelectorAll(".seam i")];
+  const btn = boutEl.querySelector(".bout-play");
+  let i = 0;
+  const audio = new Audio();
+  dayAudio = { audio, bars, btn };
+  audio.addEventListener("timeupdate", () => {
+    const c = bout.clips[i];
+    if (!c || !isFinite(audio.duration)) return;
+    const frac = Math.min(1, audio.currentTime / (audio.duration || c.seconds));
+    if (bars[i]) bars[i].querySelector("b").style.width = (frac * 100) + "%";
+  });
+  audio.addEventListener("ended", () => {
+    if (bars[i]) { bars[i].classList.remove("is-playing"); bars[i].querySelector("b").style.width = "100%"; }
+    i++;
+    if (i < bout.clips.length) play(i); else stopBoutAudio();
+  });
+  audio.addEventListener("error", () => {
+    // A clip the API advertised but that will not load. Say so on the row rather than
+    // failing silently, which would look exactly like a bout that had no audio.
+    const note = el(`<div class="note">Recording ${i + 1} could not be played.</div>`);
+    boutEl.appendChild(note);
+    stopBoutAudio();
+  });
+  function play(k) {
+    bars.forEach(b => b.classList.remove("is-playing"));
+    if (bars[k]) bars[k].classList.add("is-playing");
+    audio.src = stationUrl(bout.clips[k].url);
+    audio.play().catch(() => stopBoutAudio());
+  }
+  btn.textContent = "■";
+  play(0);
+}
+
+let dayAudio = null;
+function stopBoutAudio() {
+  if (!dayAudio) return;
+  runQuietly(() => { dayAudio.audio.pause(); dayAudio.audio.src = ""; });
+  dayAudio.bars.forEach(b => { b.classList.remove("is-playing"); b.querySelector("b").style.width = "0"; });
+  if (dayAudio.btn) dayAudio.btn.textContent = "▶";
+  dayAudio = null;
+}
+function runQuietly(fn) { try { fn(); } catch (e) {} }
+
+async function loadDaySpecies() {
+  const data = await apiMaybe(`/api/day/species?date=${encodeURIComponent(state.selectedDate)}`);
+  const host = $("daySpecies");
+  // A station too old to serve the rollup is a stale station, not an error. The tab keeps
+  // working on the endpoints that do exist rather than showing an empty list.
+  if (!data) {
+    host.innerHTML = "";
+    $("daySpeciesEmpty").classList.remove("hidden");
+    $("daySpeciesEmpty").textContent = "This station build does not serve the species rollup yet.";
+    $("dayLegend").textContent = "";
+    return;
+  }
+  stopBoutAudio();
+  const bins = data.activity_bins;
+  host.innerHTML = data.species.map(s => speciesRowHtml(s, bins)).join("");
+  $("daySpeciesEmpty").classList.toggle("hidden", data.species.length > 0);
+  $("daySpeciesEmpty").textContent = "Nothing recorded on this day.";
+  $("dayLegend").innerHTML = data.species.length
+    ? `A <strong>bout</strong> is one run of detections with no gap over
+       ${Math.round((state.settings?.bout_gap_s ?? 60))} s — one bird singing, not one bird.
+       The strip is the day split into six periods anchored to ${bins.solar
+         ? `sunrise <span class="data">${fmtClock(bins.sunrise_ms)}</span> and sunset
+            <span class="data">${fmtClock(bins.sunset_ms)}</span>`
+         : "estimated day boundaries (the sun did not cross the horizon here)"}, not to the clock.`
+    : "";
+
+  host.querySelectorAll(".sp-row").forEach(row => {
+    row.querySelector(".det-summary").addEventListener("click", () => {
+      const open = row.classList.toggle("is-open");
+      const detail = row.querySelector(".det-detail");
+      detail.style.display = open ? "block" : "none";
+      if (open && !row.dataset.loaded) loadBouts(row);
+      if (!open) stopBoutAudio();
+    });
+  });
+}
+
+async function loadBouts(row) {
+  row.dataset.loaded = "1";
+  const host = row.querySelector(".bouts");
+  const data = await apiMaybe(`/api/day/bouts?date=${encodeURIComponent(state.selectedDate)}` +
+                              `&taxon_key=${encodeURIComponent(row.dataset.taxonKey)}`);
+  if (!data) { host.innerHTML = `<span class="note">Could not load bouts — station unreachable.</span>`; return; }
+  host.innerHTML = data.bouts.map(boutHtml).join("");
+  data.bouts.forEach(b => {
+    const el2 = host.querySelector(`.bout[data-bout="${b.bout_id}"]`);
+    const play = el2 && el2.querySelector(".bout-play");
+    if (play) play.addEventListener("click", () => {
+      if (dayAudio && dayAudio.btn === play) stopBoutAudio(); else playBout(el2, b);
+    });
+  });
 }
 
 /* Time-of-day heatmap. One /api/summary call per day, so it is capped at 14 days:

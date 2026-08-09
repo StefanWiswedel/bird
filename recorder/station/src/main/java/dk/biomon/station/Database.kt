@@ -52,6 +52,77 @@ data class DetectionRow(
     )
 }
 
+/**
+ * One clip file inside a bout. A bout may own several, because the two gaps are different
+ * questions (§11m): `boutGapSeconds` (60 s) decides whether detections are the same piece
+ * of EVIDENCE, and BoutRecorder's 4 s post-roll decides whether it is worth recording the
+ * silence between them. A bird calling every twenty seconds is therefore one bout and
+ * several clips — and the bout, not the clip, is the thing a person judges.
+ *
+ * [detectionId] is what `/api/clip/{id}` is keyed on, not an identity of its own.
+ */
+data class BoutClip(val detectionId: Long, val startMs: Long?, val seconds: Double, val path: String)
+
+/**
+ * Why a bout has the audio it has. THE WHOLE POINT OF THIS TYPE is that "not yet" is not
+ * "none" (§2d): a bout recorded ninety seconds ago whose clips are still being written
+ * looks exactly like a bout that never had audio, and rendering the first as the second
+ * invites blaming the recorder for a UI mistake.
+ *
+ * - `recorded`  — every detection that was meant to have audio has it.
+ * - `partial`   — some do and some do not. Pruning takes whole files, so a multi-clip bout
+ *                 can lose its beginning and keep its end; the row has to say so rather
+ *                 than present what is left as the whole thing.
+ * - `pending`   — recent enough that BoutRecorder may still be finishing the write.
+ * - `none`      — nothing here ever cleared the clip floor, so no audio was ever recorded.
+ * - `unavailable` — audio was recorded and is gone: pruned by the cap, or the write failed.
+ */
+data class BoutAudio(val state: String, val seconds: Double, val covered: Int, val expected: Int)
+
+/**
+ * A run of detections of one taxon with no gap longer than `boutGapSeconds` — the unit of
+ * EVIDENCE, and now the unit of judgement. [countBouts] has counted these all along; this
+ * materialises them so they can be listed, played and (in the verification flow) decided.
+ *
+ * [boutId] is the first detection's id. Derived, not stored, because curation stays a
+ * read-time operation: change `boutGapSeconds` and bouts legitimately merge or split, and
+ * the ids move with them. Stable for as long as that setting is.
+ */
+data class Bout(
+    val boutId: Long,
+    val taxon: Taxon,
+    val startMs: Long,
+    val endMs: Long,
+    val detectionCount: Int,
+    val detectionIds: List<Long>,
+    val peakConfidence: Float,
+    /** The bar this bout's rows had to clear — a per-species override, or the global
+     *  default plus a plausibility penalty. Carried so the UI can show the count and the
+     *  evidence together rather than a bare "37 bouts" that reads as fact. */
+    val threshold: Float,
+    val aboveThreshold: Boolean,
+    val clips: List<BoutClip>,
+    val audio: BoutAudio
+)
+
+/** One species on one day: the row of the day list. */
+data class DaySpecies(
+    val taxon: Taxon,
+    val bouts: Int,
+    val boutsAboveThreshold: Int,
+    val detections: Int,
+    val firstMs: Long,
+    val lastMs: Long,
+    val peakConfidence: Float,
+    val threshold: Float,
+    /** Highest-confidence bout that actually has audio, for a one-tap listen. */
+    val bestBoutId: Long?,
+    val bestClip: BoutClip?,
+    /** Bouts per solar bin (six), for the activity strip. */
+    val activity: IntArray,
+    val status: String
+)
+
 data class DaySummary(val date: String, val detectionCount: Int, val speciesCount: Int)
 data class SpeciesAgg(val taxon: Taxon, val count: Int, val lastMs: Long, val bestConfidence: Float)
 data class DaySummaryData(
@@ -514,6 +585,151 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
         return bouts
     }
 
+    // ------------------------------------------------------------------ bouts
+
+    /**
+     * How long after a bout's last detection its clips may still be being written.
+     *
+     * Tied to BoutRecorder: a clip closes at most MAX_CLIP_S after it opens and POST_ROLL_S
+     * after its last trigger, then has to be renamed and attached. Inside this window a
+     * missing clip means "not finished", outside it means "not there" — and those are the
+     * two answers §2d exists to keep apart.
+     */
+    private val PENDING_GRACE_MS =
+        ((BoutRecorder.MAX_CLIP_S + BoutRecorder.POST_ROLL_S) * 1000).toLong() + 15_000L
+
+    /**
+     * Group already-read rows of ONE taxon into bouts, newest bout first.
+     *
+     * The gap rule is [countBouts]'s, deliberately — one definition of "the same event",
+     * used by the count, the day list and the verification flow alike.
+     */
+    private fun boutsOf(rows: List<DetectionRow>, settings: Settings,
+                        overrides: Map<String, Float>, prior: Double?, nowMs: Long): List<Bout> {
+        if (rows.isEmpty()) return emptyList()
+        val gapMs = settings.boutGapSeconds * 1000L
+        val sorted = rows.sortedBy { it.detectedAtMs }
+        val groups = ArrayList<MutableList<DetectionRow>>()
+        for (r in sorted) {
+            val last = groups.lastOrNull()?.lastOrNull()
+            if (last == null || (gapMs > 0 && r.detectedAtMs - last.detectedAtMs > gapMs)) {
+                groups += mutableListOf(r)
+            } else groups.last() += r
+        }
+        return groups.map { g ->
+            val first = g.first()
+            val threshold = effectiveThreshold(
+                first.taxon.key, first.taxonRegional, first.taxonInSeason, settings, overrides, prior)
+            val peak = g.maxOf { it.confidence }
+
+            // One entry per distinct FILE, in playback order. Several rows share a clip, and
+            // several clips can belong to one bout; the ordering falls back to the detection
+            // time for rows written before clip_start_ms existed.
+            val byPath = LinkedHashMap<String, BoutClip>()
+            for (r in g.sortedBy { it.clipStartMs ?: it.detectedAtMs }) {
+                val p = r.clipPath ?: continue
+                if (p !in byPath) byPath[p] = BoutClip(r.id, r.clipStartMs, r.clipSeconds, p)
+            }
+            val clips = byPath.values.toList()
+
+            // Which detections were ever MEANT to have audio. clipFloor is a write-time
+            // decision and this re-reads it at query time, so moving the slider can change
+            // the denominator for old rows; that is the same asymmetry retentionFloor has,
+            // and the alternative is storing per-row intent nobody would ever read.
+            val expected = g.count { it.confidence >= settings.clipFloor }
+            val covered = g.count { it.clipPath != null }
+            val recentEnoughToBePending = nowMs - g.maxOf { it.detectedAtMs } < PENDING_GRACE_MS
+            val state = when {
+                covered > 0 && covered >= expected -> "recorded"
+                covered > 0 -> "partial"
+                expected > 0 && recentEnoughToBePending -> "pending"
+                expected > 0 -> "unavailable"
+                else -> "none"
+            }
+            Bout(
+                boutId = first.id, taxon = first.taxon,
+                startMs = first.detectedAtMs, endMs = g.last().detectedAtMs,
+                detectionCount = g.size, detectionIds = g.map { it.id },
+                peakConfidence = peak, threshold = threshold, aboveThreshold = peak >= threshold,
+                clips = clips,
+                audio = BoutAudio(state, clips.sumOf { it.seconds }, covered, expected)
+            )
+        }.sortedByDescending { it.startMs }
+    }
+
+    /** Every bout of one taxon on one local date, newest first. */
+    fun boutsForDay(date: String, taxonKey: String, settings: Settings): List<Bout> {
+        val rows = rowsForDay(date, settings).filter { it.taxon.key == taxonKey }
+        if (rows.isEmpty()) return emptyList()
+        val prior = priorsForWeek(weekOf(rows.first().detectedAtMs))[rows.first().taxon.scientific]
+        return boutsOf(rows, settings, speciesThresholdOverrides(), prior, System.currentTimeMillis())
+    }
+
+    /** Raw rows for a local date, retention floor and non-taxon exclusions applied. */
+    private fun rowsForDay(date: String, settings: Settings): List<DetectionRow> {
+        val c = readableDatabase.rawQuery(
+            "SELECT * FROM detections WHERE local_date = ? AND confidence >= ? " +
+            "AND taxon_group != 'non_taxon' AND taxon_key NOT IN ($NON_TAXON_KEYS_SQL) " +
+            "ORDER BY detected_at_ms ASC",
+            arrayOf(date, settings.retentionFloor.toString()))
+        return c.use { readRows(it) }
+    }
+
+    /**
+     * The day list, rolled up by species — one row per species per day, which is also how
+     * birders keep a day list, and a great deal more useful than five hundred magpie rows.
+     *
+     * The headline number is BOUTS, not detections. A detection count mostly measures how
+     * long something sang near the microphone: one magpie on the railing for ten minutes
+     * outscores five magpies passing through. Neither is a bird count and neither is
+     * presented as one.
+     */
+    fun daySpecies(date: String, settings: Settings, lat: Double, lon: Double): List<DaySpecies> {
+        val rows = rowsForDay(date, settings)
+        if (rows.isEmpty()) return emptyList()
+        val overrides = speciesThresholdOverrides()
+        val rejected = rejectedSpecies()
+        val confirmedSp = lifeList().filter { it.status == "confirmed" }.map { it.scientific }.toHashSet()
+        val solar = Solar.forDate(date, lat, lon)
+        val now = System.currentTimeMillis()
+        val priorCache = HashMap<Int, Map<String, Double>>()
+
+        return rows.groupBy { it.taxon.key }.values.map { g ->
+            val taxon = g.first().taxon
+            val prior = priorCache.getOrPut(weekOf(g.first().detectedAtMs)) {
+                priorsForWeek(weekOf(g.first().detectedAtMs))
+            }[taxon.scientific]
+            val bouts = boutsOf(g, settings, overrides, prior, now)
+            val activity = IntArray(6)
+            for (b in bouts) activity[Solar.binOf(solar, b.startMs)]++
+            // "Best" means the loudest evidence that can actually be listened to. A bout
+            // with a higher score and no audio is not a better thing to offer someone whose
+            // next action is to press play.
+            val best = bouts.filter { it.clips.isNotEmpty() }.maxByOrNull { it.peakConfidence }
+            DaySpecies(
+                taxon = taxon,
+                bouts = bouts.size,
+                boutsAboveThreshold = bouts.count { it.aboveThreshold },
+                detections = g.size,
+                firstMs = g.minOf { it.detectedAtMs },
+                lastMs = g.maxOf { it.detectedAtMs },
+                peakConfidence = g.maxOf { it.confidence },
+                threshold = bouts.firstOrNull()?.threshold ?: settings.displayThreshold,
+                bestBoutId = best?.boutId,
+                bestClip = best?.clips?.firstOrNull(),
+                activity = activity,
+                status = when (taxon.scientific) {
+                    in rejected -> "rejected"
+                    in confirmedSp -> "confirmed"
+                    else -> "candidate"
+                }
+            )
+        }.sortedWith(compareByDescending<DaySpecies> { it.boutsAboveThreshold }.thenByDescending { it.bouts })
+    }
+
+    /** Solar bin edges for a date, so the API can label the strip it just sent. */
+    fun solarDay(date: String, lat: Double, lon: Double): Solar.Day = Solar.forDate(date, lat, lon)
+
     /** The general detections query behind GET /api/detections and the SSE catch-up. */
     fun listDetections(
         sinceMs: Long?, date: String?, group: String?, state: String, minConf: Float?,
@@ -672,20 +888,41 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
      * failure" §2d is about. A file is pinned if ANY of its rows is pinned, for the same
      * reason: the lifer is the audio, not the row that happens to name it.
      */
-    fun pruneToCapBytes(capBytes: Long): Int {
+    /**
+     * Every clip file that must survive: not just the file containing a pinned detection,
+     * but every file of the BOUT that detection belongs to.
+     *
+     * A bout is one piece of evidence and can span several files (§11m). Pinning only the
+     * file the pinned row happens to sit in would let the cap delete the rest of the same
+     * bout, leaving the lifer's evidence starting halfway through a phrase — audible, and
+     * wrong, which is worse than obviously missing. Pinning is per-bout because judgement
+     * is per-bout.
+     */
+    fun pinnedClipPaths(settings: Settings): Set<String> {
+        val pinned = pinnedDetectionIds()
+        if (pinned.isEmpty()) return emptySet()
+        val out = HashSet<String>()
+        // The pinned set is two ids per confirmed species, so a query per pinned row is
+        // cheap and runs on the ten-minute pruning tick.
+        val days = HashSet<Pair<String, String>>()
+        readableDatabase.rawQuery(
+            "SELECT DISTINCT local_date, taxon_key FROM detections WHERE id IN (${pinned.joinToString(",")})", null
+        ).use { while (it.moveToNext()) days.add(it.getString(0) to it.getString(1)) }
+        for ((date, taxonKey) in days) {
+            for (b in boutsForDay(date, taxonKey, settings)) {
+                if (b.detectionIds.any { id -> id in pinned }) out += b.clips.map { c -> c.path }
+            }
+        }
+        return out
+    }
+
+    fun pruneToCapBytes(capBytes: Long, settings: Settings): Int {
         var total = clipsBytesTotal()
         if (total <= capBytes) return 0
         // Pinned clips are exempt and are not counted as prunable. If the cap can only be
         // met by deleting pinned audio, the cap loses: a life list with missing evidence is
         // worth less than the disk space it would free.
-        val pinned = pinnedDetectionIds()
-        val pinnedPaths = HashSet<String>()
-        if (pinned.isNotEmpty()) {
-            readableDatabase.rawQuery(
-                "SELECT DISTINCT clip_path FROM detections WHERE clip_path IS NOT NULL AND id IN " +
-                "(${pinned.joinToString(",")})", null
-            ).use { while (it.moveToNext()) pinnedPaths.add(it.getString(0)) }
-        }
+        val pinnedPaths = pinnedClipPaths(settings)
         // Oldest FILE first, ordered by the earliest detection that references it.
         val c = readableDatabase.rawQuery(
             "SELECT clip_path, MIN(detected_at_ms) AS first_ms FROM detections " +
@@ -949,18 +1186,11 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
      *        no amount of re-recording can reproduce, so destroying it is a separate,
      *        explicit act rather than a side effect of tidying up the feed.
      */
-    fun clearAll(keepLifeList: Boolean = true) {
+    fun clearAll(settings: Settings, keepLifeList: Boolean = true) {
         val pinned = if (keepLifeList) pinnedDetectionIds() else emptySet()
-        // A file is spared if ANY row referencing it is pinned. A bout clip is shared, so
-        // checking row-by-row would delete the audio behind a lifer as soon as some other
-        // detection in the same passage was unpinned — see pruneToCapBytes for the same rule.
-        val pinnedPaths = HashSet<String>()
-        if (pinned.isNotEmpty()) {
-            readableDatabase.rawQuery(
-                "SELECT DISTINCT clip_path FROM detections WHERE clip_path IS NOT NULL AND id IN " +
-                "(${pinned.joinToString(",")})", null
-            ).use { while (it.moveToNext()) pinnedPaths.add(it.getString(0)) }
-        }
+        // Whole BOUTS are spared, not just the file the pinned row sits in — see
+        // pinnedClipPaths. Half a bout is evidence that starts mid-phrase.
+        val pinnedPaths = if (keepLifeList) pinnedClipPaths(settings) else emptySet()
         readableDatabase.rawQuery(
             "SELECT DISTINCT clip_path FROM detections WHERE clip_path IS NOT NULL", null
         ).use {

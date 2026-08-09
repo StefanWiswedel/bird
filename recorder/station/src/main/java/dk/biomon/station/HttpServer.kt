@@ -348,6 +348,48 @@ class HttpServer(
                 })
                 writeJson(out, 200, JSONObject().put("schema", 1).put("today", today).put("days", arr))
             }
+            // The day list, rolled up by species. One row per species per day — the unit a
+            // birder actually keeps — instead of five hundred magpie rows.
+            p == "/api/day/species" -> {
+                val date = req.query["date"] ?: Detection.localDate(System.currentTimeMillis())
+                val st = settings.get()
+                val solar = db.solarDay(date, station.lat ?: 0.0, station.lon ?: 0.0)
+                val arr = jsonArrayOf(db.daySpecies(date, st, station.lat ?: 0.0, station.lon ?: 0.0).map { s ->
+                    JSONObject()
+                        .put("taxon", s.taxon.json())
+                        // BOUTS is the headline. detections is carried too, but the two are
+                        // labelled so neither can be mistaken for a count of birds.
+                        .put("bouts", s.bouts)
+                        .put("bouts_above_threshold", s.boutsAboveThreshold)
+                        .put("detections", s.detections)
+                        .put("first_ms", s.firstMs).put("last_ms", s.lastMs)
+                        .put("peak_confidence", round3(s.peakConfidence))
+                        .put("threshold", round3(s.threshold))
+                        .put("best_bout_id", s.bestBoutId ?: JSONObject.NULL)
+                        .put("best_clip", s.bestClip?.let { clipJson(it) } ?: JSONObject.NULL)
+                        .put("activity", org.json.JSONArray().also { a -> s.activity.forEach { a.put(it) } })
+                        .put("species_status", s.status)
+                        .put("photo", photoJson(s.taxon.key) ?: JSONObject.NULL)
+                })
+                writeJson(out, 200, JSONObject().put("schema", 1).put("date", date)
+                    .put("server_ms", System.currentTimeMillis())
+                    .put("count", arr.length()).put("species", arr)
+                    .put("activity_bins", solarJson(solar))
+                    .put("station", station.json()))
+            }
+            // The bouts behind one of those rows. Separate request because a day's worth of
+            // bouts with their clips is far more than a list view needs up front.
+            p == "/api/day/bouts" -> {
+                val date = req.query["date"] ?: Detection.localDate(System.currentTimeMillis())
+                val key = req.query["taxon_key"]
+                if (key.isNullOrBlank()) {
+                    writeJson(out, 400, JSONObject().put("error", "taxon_key is required")); return
+                }
+                val bouts = db.boutsForDay(date, key, settings.get())
+                writeJson(out, 200, JSONObject().put("schema", 1).put("date", date)
+                    .put("taxon_key", key).put("count", bouts.size)
+                    .put("bouts", jsonArrayOf(bouts.map { boutJson(it) })))
+            }
             p == "/api/species" -> {
                 val sp = db.speciesSummary(settings.get())
                 val arr = jsonArrayOf(sp.map {
@@ -478,7 +520,7 @@ class HttpServer(
                 // decisions that re-recording cannot reproduce. Default keeps it.
                 val alsoLifeList = req.query["life_list"] == "true"
                 val before = db.clearPreview()
-                db.clearAll(keepLifeList = !alsoLifeList)
+                db.clearAll(settings.get(), keepLifeList = !alsoLifeList)
                 val after = db.clearPreview()
                 writeJson(out, 200, JSONObject().put("cleared", true)
                     .put("detections_deleted", before.detections - after.detections)
@@ -558,6 +600,50 @@ class HttpServer(
     }
 
     private fun round3(f: Float): Double = Math.round(f * 1000.0) / 1000.0
+
+    /** One clip file of a bout. `url` is keyed on a detection id because that is what
+     *  /api/clip/{id} serves; it is not an identity for the clip. */
+    private fun clipJson(c: BoutClip): JSONObject = JSONObject()
+        .put("url", "/api/clip/${c.detectionId}")
+        .put("detection_id", c.detectionId)
+        .put("seconds", Math.round(c.seconds * 10.0) / 10.0)
+        .put("starts_at_ms", c.startMs ?: JSONObject.NULL)
+        .put("mime", "audio/wav")
+
+    /**
+     * A bout and, in playback order, the clips it is made of.
+     *
+     * `audio.state` is the field that matters and the reason this is not just a list: an
+     * empty `clips` array means four different things (never recorded / still being written
+     * / pruned / failed) and collapsing them into "no audio" is exactly the §2d mistake.
+     */
+    private fun boutJson(b: Bout): JSONObject = JSONObject()
+        .put("bout_id", b.boutId)
+        .put("taxon", b.taxon.json())
+        .put("start_ms", b.startMs).put("end_ms", b.endMs)
+        .put("seconds", Math.round((b.endMs - b.startMs) / 100.0) / 10.0)
+        .put("detections", b.detectionCount)
+        .put("detection_ids", org.json.JSONArray().also { a -> b.detectionIds.forEach { a.put(it) } })
+        .put("peak_confidence", round3(b.peakConfidence))
+        .put("threshold", round3(b.threshold))
+        .put("above_threshold", b.aboveThreshold)
+        .put("clips", jsonArrayOf(b.clips.map { clipJson(it) }))
+        .put("audio", JSONObject()
+            .put("state", b.audio.state)
+            .put("seconds", Math.round(b.audio.seconds * 10.0) / 10.0)
+            .put("covered_detections", b.audio.covered)
+            .put("expected_detections", b.audio.expected))
+
+    /** The strip's bin boundaries, so the client labels the same six periods the server
+     *  binned into rather than re-deriving them and drifting. */
+    private fun solarJson(d: Solar.Day): JSONObject = JSONObject()
+        .put("labels", org.json.JSONArray().also { a -> Solar.BIN_LABELS.forEach { a.put(it) } })
+        .put("edges_ms", org.json.JSONArray().also { a -> d.binEdgesMs.forEach { a.put(it) } })
+        .put("sunrise_ms", d.sunriseMs).put("sunset_ms", d.sunsetMs)
+        .put("civil_dawn_ms", d.civilDawnMs).put("civil_dusk_ms", d.civilDuskMs)
+        // False when the sun never crossed a threshold and the edges are interpolated.
+        // The strip still renders; it just is not a solar strip, and says so.
+        .put("solar", d.solar)
 
     // ------------------------------------------------------------------ SSE
 

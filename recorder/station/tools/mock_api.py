@@ -252,6 +252,22 @@ def seed_history():
                 continue
             sp = rnd.choices(SPECIES, weights=weights)[0]
             rows.append(make_row(sp, int(ts.timestamp() * 1000), rnd))
+    # A DELIBERATE DENSE BOUT on today's date. The random rows above are mostly isolated,
+    # so without this the "one bout, several clips" case — the whole reason the bout owns a
+    # list — would almost never appear in the mock and could not be built against.
+    singer = next(s for s in SPECIES if s[0] == "turdus_merula")
+    base = today + timedelta(hours=6, minutes=12)
+    for i in range(14):
+        # 2 s apart inside a phrase, ~22 s between phrases: one bout (60 s gap rule),
+        # several clips (4 s post-roll rule).
+        offset = (i // 4) * 22 + (i % 4) * 2
+        ts = int((base + timedelta(seconds=offset)).timestamp() * 1000)
+        if ts > now_ms():
+            continue
+        r = make_row(singer, ts, rnd)
+        r["has_clip"] = True
+        r["conf"] = round(min(0.97, 0.71 + i * 0.01), 3)
+        rows.append(r)
     rows.sort(key=lambda r: r["ts"])
     with LOCK:
         ROWS[:] = rows
@@ -265,7 +281,7 @@ def serialize(row):
     if row["has_photo"]:
         photo = dict(PHOTO_META, url="/api/photo/" + sp[0])
     clip = None
-    if row["has_clip"]:
+    if clip_ready(row):
         off = row.get("clip_offset_s")
         clip = {
             "url": "/api/clip/%d" % row["id"],
@@ -557,6 +573,173 @@ def days_body():
     return {"schema": SCHEMA, "today": local_date(now_ms()), "days": out}
 
 
+# --------------------------------------------------------------------------- bouts
+
+def solar_day(datestr):
+    """Six bin edges anchored to the sun, mirroring Solar.kt.
+
+    The mock reproduces the SHAPE, not the astronomy: sunrise/sunset are interpolated
+    across the year between the Copenhagen solstice extremes. That is enough for the
+    dashboard to be built against, and it moves through the year the way the real thing
+    does, which is the property the strip depends on.
+    """
+    lo, _ = day_bounds(datestr)
+    y, m, d = (int(x) for x in datestr.split("-"))
+    doy = (datetime(y, m, d, tzinfo=TZ) - datetime(y, 1, 1, tzinfo=TZ)).days
+    # peaks at the June solstice (doy 172)
+    season = math.cos((doy - 172) / 365.25 * 2 * math.pi)
+    sunrise_h = 6.5 - 2.1 * season        # 04:26 midsummer .. 08:37 midwinter
+    sunset_h = 18.75 + 3.2 * season
+    def at(h):
+        return int(lo + h * 3600000)
+    edges = [lo, at(sunrise_h - 0.65), at(sunrise_h + 1.0), at((sunrise_h + sunset_h) / 2),
+             at(sunset_h - 1.0), at(sunset_h + 0.65), lo + 86400000]
+    edges = sorted(edges)
+    return {
+        "labels": ["night", "dawn", "morning", "afternoon", "dusk", "late"],
+        "edges_ms": edges,
+        "sunrise_ms": at(sunrise_h), "sunset_ms": at(sunset_h),
+        "civil_dawn_ms": at(sunrise_h - 0.65), "civil_dusk_ms": at(sunset_h + 0.65),
+        "solar": True,
+    }
+
+
+def bin_of(bins, ts):
+    e = bins["edges_ms"]
+    for i in range(6):
+        if ts < e[i + 1]:
+            return i
+    return 5
+
+
+def clip_ready(r):
+    """Whether this row's clip exists YET.
+
+    A bout clip is written after its trigger — pre-roll, the bout, post-roll, then the
+    rename — so a detection that just arrived has no clip for a few seconds and its bout
+    reports `pending`, not `none`. The mock reproduces that transition deliberately: it is
+    the state that did not exist before bout clips, and the one most easily rendered as
+    "no audio" when it means "not finished yet" (§2d).
+    """
+    return r["has_clip"] and (now_ms() - r["ts"]) > 20000
+
+
+def bouts_of(rows, st):
+    """Group one species' rows into bouts, then bouts into clips — mirrors Database.boutsOf.
+
+    A bout can own SEVERAL clips: boutGapSeconds (60 s) decides what is one piece of
+    evidence, BoutRecorder's 4 s post-roll decides what is one continuous recording.
+    """
+    gap_ms = st.get("bout_gap_s", 60) * 1000
+    rows = sorted(rows, key=lambda r: r["ts"])
+    groups = []
+    for r in rows:
+        if groups and r["ts"] - groups[-1][-1]["ts"] <= gap_ms:
+            groups[-1].append(r)
+        else:
+            groups.append([r])
+    out = []
+    for g in groups:
+        first = g[0]
+        sp = first["sp"]
+        thr = effective_threshold(sp[0], sp[9], sp[10], st)
+        peak = max(r["conf"] for r in g)
+        expected = sum(1 for r in g if r["conf"] >= st.get("clip_floor", 0.5))
+        withclip = [r for r in g if clip_ready(r)]
+        # Clips split within a bout every ~4 s of silence: rows more than that apart get
+        # their own file, which is what makes "one bout, several clips" real in the mock.
+        clips = []
+        for r in withclip:
+            if not clips or r["ts"] - clips[-1]["_last_ts"] > 4000:
+                off = r.get("clip_offset_s") or 5.0
+                clips.append({"url": "/api/clip/%d" % r["id"], "detection_id": r["id"],
+                              "seconds": r["clip_s"], "mime": "audio/wav",
+                              "starts_at_ms": int(r["ts"] - off * 1000), "_last_ts": r["ts"]})
+            else:
+                clips[-1]["_last_ts"] = r["ts"]
+        covered = len(withclip)
+        age = now_ms() - g[-1]["ts"]
+        # "not yet" is not "none" (§2d). PENDING_GRACE mirrors BoutRecorder's cap + post-roll.
+        if covered and covered >= expected:
+            state = "recorded"
+        elif covered:
+            state = "partial"
+        elif expected and age < 79000:
+            state = "pending"
+        elif expected:
+            state = "unavailable"
+        else:
+            state = "none"
+        for c in clips:
+            c.pop("_last_ts", None)
+        out.append({
+            "bout_id": first["id"],
+            "taxon": taxon_of(sp),
+            "start_ms": first["ts"], "end_ms": g[-1]["ts"],
+            "seconds": round((g[-1]["ts"] - first["ts"]) / 1000.0, 1),
+            "detections": len(g),
+            "detection_ids": [r["id"] for r in g],
+            "peak_confidence": peak,
+            "threshold": round(thr, 3),
+            "above_threshold": peak >= thr,
+            "clips": clips,
+            "audio": {"state": state, "seconds": round(sum(c["seconds"] for c in clips), 1),
+                      "covered_detections": covered, "expected_detections": expected},
+        })
+    out.sort(key=lambda b: b["start_ms"], reverse=True)
+    return out
+
+
+def rows_for_day(datestr):
+    lo, hi = day_bounds(datestr)
+    st = settings_snapshot()
+    return [r for r in visible_rows()
+            if lo <= r["ts"] < hi and r["conf"] >= st["retention_floor"]]
+
+
+def day_species_body(datestr):
+    st = settings_snapshot()
+    bins = solar_day(datestr)
+    by_key = {}
+    for r in rows_for_day(datestr):
+        by_key.setdefault(r["sp"][0], []).append(r)
+    species = []
+    for key, rows in by_key.items():
+        sp = rows[0]["sp"]
+        bouts = bouts_of(rows, st)
+        activity = [0] * 6
+        for b in bouts:
+            activity[bin_of(bins, b["start_ms"])] += 1
+        withaudio = [b for b in bouts if b["clips"]]
+        best = max(withaudio, key=lambda b: b["peak_confidence"]) if withaudio else None
+        species.append({
+            "taxon": taxon_of(sp),
+            "bouts": len(bouts),
+            "bouts_above_threshold": sum(1 for b in bouts if b["above_threshold"]),
+            "detections": len(rows),
+            "first_ms": min(r["ts"] for r in rows), "last_ms": max(r["ts"] for r in rows),
+            "peak_confidence": max(r["conf"] for r in rows),
+            "threshold": bouts[0]["threshold"] if bouts else st["display_threshold"],
+            "best_bout_id": best["bout_id"] if best else None,
+            "best_clip": best["clips"][0] if best else None,
+            "activity": activity,
+            "species_status": "candidate",
+            "photo": dict(PHOTO_META, url="/api/photo/" + key) if key not in NO_PHOTO_KEYS else None,
+        })
+    species.sort(key=lambda s: (s["bouts_above_threshold"], s["bouts"]), reverse=True)
+    return {"schema": SCHEMA, "date": datestr, "server_ms": now_ms(),
+            "count": len(species), "species": species,
+            "activity_bins": bins, "station": dict(STATION)}
+
+
+def day_bouts_body(datestr, taxon_key):
+    st = settings_snapshot()
+    rows = [r for r in rows_for_day(datestr) if r["sp"][0] == taxon_key]
+    bouts = bouts_of(rows, st)
+    return {"schema": SCHEMA, "date": datestr, "taxon_key": taxon_key,
+            "count": len(bouts), "bouts": bouts}
+
+
 def species_body():
     st = settings_snapshot()
     agg = {}
@@ -763,6 +946,25 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self._json({"error": "bad date"}, 400)
             return self._json(summary_body(d))
+
+        if path == "/api/day/species":
+            d = (q.get("date") or [local_date(now_ms())])[0]
+            try:
+                day_bounds(d)
+            except Exception:
+                return self._json({"error": "bad date"}, 400)
+            return self._json(day_species_body(d))
+
+        if path == "/api/day/bouts":
+            d = (q.get("date") or [local_date(now_ms())])[0]
+            key = (q.get("taxon_key") or [""])[0]
+            if not key:
+                return self._json({"error": "taxon_key is required"}, 400)
+            try:
+                day_bounds(d)
+            except Exception:
+                return self._json({"error": "bad date"}, 400)
+            return self._json(day_bouts_body(d, key))
 
         if path == "/api/detections":
             return self._json(self._detections(q))
