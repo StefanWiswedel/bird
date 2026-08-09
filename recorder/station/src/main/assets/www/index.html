@@ -242,6 +242,9 @@ main { max-width: 640px; margin: 0 auto; padding: var(--space-24) var(--space-16
 }
 /* THE ONLY --signal in the ordinary UI: a rarity flag, outline never fill (§2). */
 .tag.is-rare { color: var(--signal); border-color: var(--signal); }
+/* A station problem, not a rare bird — ember, because --signal is reserved (§2) and a
+   failure to keep audio must not read as something exciting. */
+.tag.is-warn { color: var(--ember); border-color: var(--ember); }
 
 .det-detail { display: none; padding: 0 0 var(--space-16) calc(6ch + var(--space-12)); }
 .det.is-open .det-detail { display: flex; flex-direction: column; gap: var(--space-12); }
@@ -1264,6 +1267,15 @@ function renderHealth(h) {
     banners.appendChild(el(`<div class="banner is-warn"><div><strong>Not listening.</strong>
       The station has stopped capturing audio. It has restarted
       <span class="data">${h.restarts}</span> time(s) since install.</div></div>`));
+  }
+  // Audio that cannot be written is invisible without this: detections keep appearing,
+  // the feed looks healthy, and every row silently has no clip to verify from later.
+  // A count that only goes up is a fault, not a statistic — banner, not a Settings line.
+  if (h.storage && h.storage.clips_failed > 0) {
+    banners.appendChild(el(`<div class="banner is-warn"><div><strong>Audio not being kept.</strong>
+      <span class="data">${h.storage.clips_failed}</span> recording(s) could not be written — most
+      likely the phone is out of space (<span class="data">${esc(fmtBytes(h.storage.free_bytes))}</span>
+      free). Detections are still being stored, but without clips they cannot be verified later.</div></div>`));
   }
   if (h.thermal && h.thermal.throttled) {
     // The station's OWN decision to slow inference, not the OS's — said plainly (API.md).
@@ -2513,12 +2525,22 @@ function renderDiagnostics() {
   ] : [["Spectrogram", "not reported by this station build"]]));
 
   const pct = h.storage.cap_bytes ? Math.round(100 * h.storage.clips_bytes / h.storage.cap_bytes) : 0;
+  const st = h.storage;
   kv($("storageKv"), [
-    ["Clips", h.storage.clips],
+    // Clips are bout-scoped and shared, so this counts FILES; one file can carry a dozen
+    // detections of several species. Said plainly rather than left to be inferred.
+    ["Clips", st.clips + (st.recording ? " · recording" : "")],
     ["Clip bytes", esc(fmtBytes(h.storage.clips_bytes)) + " of " + esc(fmtBytes(h.storage.cap_bytes)) + " (" + pct + "%)"],
     ["Free space", esc(fmtBytes(h.storage.free_bytes))],
     ["Pruned", h.storage.pruned_total],
-  ]);
+  ].concat(
+    // Only shown when non-zero, but shown LOUDLY when it is: a station that cannot write
+    // audio any more looks exactly like a quiet station otherwise, which is the §2d
+    // failure. Older builds don't report the field at all — absent is not zero, so an
+    // undefined value shows nothing rather than a reassuring "0".
+    typeof st.clips_failed === "number" && st.clips_failed > 0
+      ? [["Clips not written", `<span class="tag is-warn">${st.clips_failed}</span>`]] : []
+  ));
 
   // Older stations serve the dashboard straight from the APK and report no block at all;
   // that is a stale station, not an error, so it degrades to one honest line — the same

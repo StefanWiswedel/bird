@@ -40,7 +40,8 @@ Version `schema: 1`. Anything that changes the meaning of an existing field bump
   "regional": true,
   "in_season": true,
 
-  "clip": { "url": "/api/clip/4127", "seconds": 6.0, "mime": "audio/wav" },
+  "clip": { "url": "/api/clip/4127", "seconds": 18.4, "mime": "audio/wav",
+            "starts_at_ms": 1785640457000, "detection_offset_s": 5.0 },
   "photo": { "url": "/api/photo/turdus_merula", "attribution": "…", "license": "CC BY-SA 4.0", "source": "https://commons.wikimedia.org/wiki/File:…" },
 
   "station": { "id": "balcony-5t", "name": "Balcony", "lat": 55.6478, "lon": 12.5875, "tz": "Europe/Copenhagen" }
@@ -77,7 +78,28 @@ Version `schema: 1`. Anything that changes the meaning of an existing field bump
   as "no photo exists" — a transport failure must never be reported as absent data. The
   photo cache tracks the difference internally; the API only ever promises "not available
   right now", and the dashboard renders a designed placeholder rather than a broken image.
-- **`clip` may be `null`** for a candidate whose clip was pruned by the storage cap.
+- **`clip` may be `null`** for a candidate whose clip was pruned by the storage cap, or
+  whose bout is still being recorded, or whose audio could not be written at all. These
+  are different situations and none of them is "there was no sound" — see below.
+- **A clip is a BOUT, not a window, and it is shared.** `seconds` is the real duration of
+  the file, no longer the model's 3.0 s window. One file covers a whole bout — every
+  detection in it, including detections of *different species* heard in the same passage,
+  points at the same `url`. Consumers must not assume one clip per detection, and anything
+  counting clips counts distinct URLs.
+- **`clip.starts_at_ms` is when the clip's AUDIO begins**, which is earlier than
+  `detected_at_ms` because the recording includes a pre-roll: detections fire mid-phrase
+  and the opening notes are often the diagnostic part. `detection_offset_s` is the derived
+  convenience — where in the file this particular detection starts — so a player can seek
+  there instead of starting at zero.
+  Both are **`null`, never `0`**, when the clip's start is unknown (a row written before
+  bout clips existed). "Play from the beginning" and "we do not know where in this file to
+  look" are different answers, and a fabricated `0` would be indistinguishable from a real
+  one (§2d).
+- **A clip is written AFTER its detection**, because it runs on past the trigger and the
+  future cannot be recorded. A row therefore appears with `clip: null` and gains a clip
+  seconds later. A row never points at a partially written file: the audio is renamed into
+  place before any row references it, so a clip that is advertised is a clip that is
+  complete.
 
 ---
 
@@ -95,7 +117,7 @@ this is a LAN appliance the user opens from whatever device is to hand.
 | GET | `/api/summary` | one day's rollup |
 | GET | `/api/days` | dates that have data, for history navigation |
 | GET | `/api/species` | distinct taxa seen, with photo + counts |
-| GET | `/api/clip/{id}` | `audio/wav`, supports `Range` |
+| GET | `/api/clip/{id}` | `audio/wav`, supports `Range` — the whole bout, not one window |
 | GET | `/api/live-audio` | most recent 3 s raw window as `audio/wav`, not a stored clip |
 | GET | `/api/photo/{taxonKey}` | `image/jpeg` from the on-device cache |
 | GET | `/api/events` | SSE stream (live feed) |
@@ -137,7 +159,9 @@ and a skewed client clock would silently skip or repeat detections.
   "audio": { "sample_rate": 48000, "source": "UNPROCESSED", "window_s": 3.0, "hop_s": 1.5 },
   "inference": { "last_ms": 118, "mean_ms": 124, "duty_pct": 8.3, "windows_total": 402118 },
   "thermal": { "battery_c": 33.2, "status": "NONE", "throttled": false },
-  "storage": { "clips_bytes": 812334592, "cap_bytes": 10737418240, "free_bytes": 115964116992, "clips": 1412, "pruned_total": 0 },
+  "storage": { "clips_bytes": 812334592, "cap_bytes": 17179869184, "free_bytes": 115964116992,
+               "clips": 1412, "pruned_total": 0,
+               "clips_written": 1508, "clips_failed": 0, "recording": false },
   "queue": { "pending": 0, "publishers": ["local"] },
   "settings": { "display_threshold": 0.65, "retention_floor": 0.10, "repeat_required": 2,
                 "repeat_window_min": 30, "region_season_filter_enabled": true },
@@ -149,6 +173,12 @@ and a skewed client clock would silently skip or repeat detections.
 
 `thermal.throttled` is the station's own decision, not the OS's. It means inference has
 been slowed deliberately. The dashboard should say so plainly rather than hide it.
+
+`storage.clips` counts **files**, not rows, since a bout clip is shared by every detection
+in it. `clips_failed` counts clips abandoned because the audio could not be written — a
+station that has silently stopped keeping audio (disk full, storage unmounted) otherwise
+looks exactly like a station on a quiet day, which is the §2d mistake in its purest form.
+`recording` is true while a bout is open right now.
 
 `dashboard` describes the **files being served**, which since `POST /api/dashboard/update`
 are no longer necessarily the ones inside the APK. `stored` is `false` and

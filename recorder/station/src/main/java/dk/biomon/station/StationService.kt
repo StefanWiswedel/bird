@@ -18,7 +18,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
-import java.io.RandomAccessFile
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -43,7 +42,27 @@ class StationService : Service(), HealthProvider {
     companion object {
         const val CHANNEL_ID = "station"
         const val NOTIF_ID = 1
-        const val CLIP_CAP_BYTES = 8L * 1024 * 1024 * 1024   // 8 GB — see final report for why
+        /**
+         * Clip storage cap. Raised from 8 GB when clips became bout-scoped.
+         *
+         * Modelled against the committed 19 h corpus (`data/station_backup_20260803`), the
+         * only measured clip-rate evidence there is. 266 windows cleared the 0.50 clip
+         * floor in 18.7 h. Under the old rule that was one 3 s file each: ~96 MB/day, and
+         * 8 GB held ~85 days. Under bout clips those windows group into 202 clips averaging
+         * ~12 s with pre- and post-roll: ~306 MB/day, and 8 GB would hold only ~27 days.
+         *
+         * Two assumptions, both stated because they move the number:
+         * - That corpus is INDOOR and known-negative, so its triggers are isolated. It is
+         *   therefore the WORST case for bout merging — real song produces many adjacent
+         *   windows that collapse into one clip, so a deployed station should land below
+         *   306 MB/day, not above.
+         * - The phone reports >100 GB free, so 16 GB is a cap rather than a reservation;
+         *   nothing is pre-allocated and pruning still runs every ten minutes.
+         *
+         * 16 GB at the modelled worst case is ~54 days of audio, which comfortably covers a
+         * verification backlog of a few weeks — the actual requirement.
+         */
+        const val CLIP_CAP_BYTES = 16L * 1024 * 1024 * 1024
         const val HEARTBEAT_KEY = "heartbeat_ms"
         const val PREFS = "station_runtime"
     }
@@ -55,6 +74,7 @@ class StationService : Service(), HealthProvider {
     private lateinit var httpServer: HttpServer
     private lateinit var publisher: LocalPublisher
     private lateinit var audioCapture: AudioCapture
+    private lateinit var boutRecorder: BoutRecorder
     private lateinit var clipsDir: File
     private var birdNet: BirdNet? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -89,6 +109,11 @@ class StationService : Service(), HealthProvider {
         speciesTable = StationSpecies.load(this)
         publisher = LocalPublisher(db)
         clipsDir = File(getExternalFilesDir(null), "clips").apply { mkdirs() }
+        boutRecorder = BoutRecorder(clipsDir)
+        // Before any recording starts. A `.part` left by a kill is referenced by no row —
+        // the row is only updated after the rename — so removing it strands nothing, and
+        // leaving it would slowly fill the disk with audio nothing can ever play.
+        boutRecorder.cleanupOrphans()
         audioCapture = AudioCapture(this)
 
         // Before the server can answer a single request: the dashboard is served from disk
@@ -119,6 +144,11 @@ class StationService : Service(), HealthProvider {
     override fun onDestroy() {
         listening = false
         runCatching { audioCapture.stop() }
+        // AFTER capture has stopped, so nothing is still appending, and BEFORE the database
+        // closes, so the rows can still be updated. A bout in progress is finished short
+        // rather than discarded — a clip that is four seconds less than ideal is worth more
+        // than no clip, and the alternative is a `.part` the next start would delete.
+        runCatching { boutRecorder.flush()?.let(::onClipFinished) }
         runCatching { httpServer.stop() }
         runCatching { birdNet?.close() }
         wakeLock?.let { if (it.isHeld) it.release() }
@@ -199,6 +229,33 @@ class StationService : Service(), HealthProvider {
             spectrogram = s
         }
         s.accept(buf, n, System.currentTimeMillis())
+
+        // The same continuous tap also feeds clip recording: the pre-roll ring, and the
+        // body of any bout currently being written. A clip finishes here rather than in
+        // onWindow because its end is defined by audio arriving with no new trigger.
+        boutRecorder.accept(buf, n, captureRate)?.let(::onClipFinished)
+    }
+
+    /**
+     * A bout clip finished. This is the second half of the deferred write: the rows went in
+     * without a clip while the audio was still being recorded, and now they get one.
+     *
+     * Ordering matters — the file is already renamed into place by the time this is called,
+     * so there is no window in which a row names a clip that does not exist.
+     */
+    private fun onClipFinished(clip: BoutRecorder.Finished) {
+        if (clip.detectionIds.isEmpty()) {
+            // Nothing to attach it to: every row from this bout was dropped (non-taxon, or
+            // off-checklist). Keeping the file would be an orphan the cap eventually
+            // deletes; deleting it now is the same outcome, sooner and traceably.
+            runCatching { File(clip.path).delete() }
+            return
+        }
+        runCatching { db.attachClip(clip.detectionIds, clip.path, clip.seconds, clip.startedAtMs) }
+            .onFailure {
+                android.util.Log.w("StationService", "could not attach clip ${clip.path}", it)
+                runCatching { File(clip.path).delete() }
+            }
     }
 
     private fun onCaptureError(e: Throwable) {
@@ -257,13 +314,16 @@ class StationService : Service(), HealthProvider {
         for (i in scores.indices) if (scores[i] >= floor) hits += i to scores[i]
         if (hits.isEmpty()) return
 
-        var clipPath: String? = null
-        var clipFileWritten = false
         // Whether this window's AUDIO is worth keeping is a different question from whether
         // its rows are (Settings.clipFloor). Decided once for the whole window rather than
         // per hit, because there is only one clip: if anything in this window is worth
         // listening to, the window is worth keeping.
+        //
+        // The clip is no longer written here. A bout clip runs on past its trigger, so it
+        // cannot exist yet; trigger() opens or extends the recording and the rows below go
+        // in with no clip, to be updated by onClipFinished when the audio is complete.
         val keepClip = hits.any { it.second >= cfg.clipFloor }
+        if (keepClip) boutRecorder.trigger(w.startAtMs)
 
         for ((idx, conf) in hits) {
             val sp = speciesTable.byIndex[idx] ?: continue
@@ -274,10 +334,6 @@ class StationService : Service(), HealthProvider {
             // below which still stores and shows in-list-but-implausible detections as
             // low-confidence candidates.
             if (!sp.regional) continue
-            if (keepClip && !clipFileWritten) {
-                clipPath = writeClip(w)
-                clipFileWritten = true
-            }
             val taxon = sp.copy(modelIndex = idx)
             // Region/season plausibility is judged once, here, against the calendar month
             // the bird was actually heard in — not re-evaluated against "now" every time
@@ -289,10 +345,14 @@ class StationService : Service(), HealthProvider {
                 detectedAtMs = w.startAtMs, windowMs = (AudioCapture.WINDOW_S * 1000).toInt(),
                 taxon = taxon, detector = "birdnet", detectorVersion = "GLOBAL_6K_V2.4",
                 scoreType = "birdnet_confidence", confidence = conf,
-                clipPath = clipPath, clipSeconds = AudioCapture.WINDOW_S,
+                // No clip yet, by construction — see keepClip above. clipSeconds becomes
+                // the clip's REAL duration when onClipFinished attaches it, rather than the
+                // model's window length, which was only ever true by coincidence.
+                clipPath = null, clipSeconds = 0.0, clipStartMs = null,
                 taxonRegional = taxon.regional, taxonInSeason = inSeason
             )
             val id = db.insert(nd)
+            if (keepClip) boutRecorder.attach(id)
             // Candidates accumulate from new detections only — nothing is grandfathered into
             // the life list, and nothing here can ever reach 'confirmed'. That transition is
             // reserved for a human verdict (Database.recordVerification).
@@ -310,19 +370,6 @@ class StationService : Service(), HealthProvider {
                 }
                 httpServer.broadcastDetection(curated.toDetection(), photo)
             }
-        }
-    }
-
-    private fun writeClip(w: AudioCapture.Window): String {
-        val f = File(clipsDir, "${w.startAtMs}.wav")
-        writeWav(f, w.pcm16, AudioCapture.MODEL_RATE)
-        return f.absolutePath
-    }
-
-    private fun writeWav(f: File, pcm16: ShortArray, sampleRate: Int) {
-        RandomAccessFile(f, "rw").use { raf ->
-            raf.setLength(0)
-            raf.write(encodeWav(pcm16, sampleRate))
         }
     }
 
@@ -436,8 +483,14 @@ class StationService : Service(), HealthProvider {
             })
             .put("thermal", JSONObject().put("battery_c", battTempTenths / 10.0)
                 .put("status", thermalName).put("throttled", thermalStatus >= PowerManager.THERMAL_STATUS_MODERATE))
+            // `clips` counts FILES, not rows — one bout clip serves every detection in the
+            // bout. `clips_failed` is separate on purpose (§2d): a station that has quietly
+            // stopped being able to write audio must not look like a quiet station.
             .put("storage", JSONObject().put("clips_bytes", clipsBytes).put("cap_bytes", CLIP_CAP_BYTES)
-                .put("free_bytes", freeBytes).put("clips", clipsCount).put("pruned_total", 0))
+                .put("free_bytes", freeBytes).put("clips", clipsCount).put("pruned_total", 0)
+                .put("clips_written", boutRecorder.clipsWritten)
+                .put("clips_failed", boutRecorder.failedClips)
+                .put("recording", boutRecorder.isRecording()))
             .put("queue", JSONObject().put("pending", 0).put("publishers", org.json.JSONArray(listOf("local"))))
             .put("settings", settingsStore.get().json())
     }
