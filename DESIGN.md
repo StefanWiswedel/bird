@@ -982,6 +982,34 @@ its own measurement.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-08-09) **Verification is triage with a two-part verdict; schema v7** (§11p). The
+  station could not be verified by a non-expert, which made its output unverifiable in
+  practice: the flow asked "is this a Blackbird?" of someone who can reliably tell a bird
+  from a bike brake and cannot name species by ear. So the verdict splits in two. *"Is
+  there really an animal here?"* is answerable every time and is where nearly all the value
+  is, because the false-positive mass is the actual problem; *"is it this species?"* often
+  is not, and **"something real, but I don't know what" is now a first-class stored
+  answer** rather than being flattened into a rejection — §2d aimed straight at the one
+  table the life list is built from. The list is tiered to match (`machine` /
+  `bird` / `species` / `rejected`), and only a species identification is a life tick.
+  The flow itself is a **list you choose from**, not a queue that advances into you:
+  ordered by stakes (possible new species, then implausible-for-here, then boundary cases),
+  grouped by species, resumable, and nothing auto-advances into the next species — finishing
+  one has to feel like finishing. **Verdicts are stored per detection id, never per
+  `bout_id`**: a bout is a read-time projection of `bout_gap_s` and its id moves when that
+  setting moves, so a bout that later splits leaves both halves verified and two that merge
+  leave a genuinely part-decided bout, displayed as exactly that. Bulk accept exists but is
+  refused server-side for a species not yet on the life list. Also added `GET
+  /api/data/export`, which downloads `station.db` — the API has had a DELETE that wipes
+  everything since the beginning and no way to take a copy first, and the phone cannot be
+  reached from a laptop.
+  **A fresh install lands directly on schema v7.** The station has been off and nothing
+  since `build-1` was installed, so all of this arrives on an empty database and the
+  `verifications` table was given its correct shape rather than having columns bolted onto
+  the old one. The migration discipline is unchanged and still governs everything future —
+  §11k's rule that every migration from v5 onward must preserve `pinnedDetectionIds()` — it
+  simply is not load-bearing for this particular install. The v7 step still migrates old
+  verdicts rather than dropping them, because they are human decisions.
 - (2026-08-09) **The day list is rolled up by species, and the bout becomes the unit of
   judgement** (§11o). Two changes that turned out to be one. PR 1 left a mismatch:
   `countBouts` merges detections within `bout_gap_s` (60 s) while `BoutRecorder` closes a
@@ -2140,6 +2168,62 @@ also where the audio is, because a bout is several files.
   width without horizontal scroll, and six bins cannot imply hourly precision that a handful
   of bouts does not have. When the sun never crosses a threshold the edges are interpolated
   and `solar: false` says so rather than presenting a guess as astronomy.
+
+### 11p. Verification as triage, and the two-part verdict
+
+**The tool was asking a question its user cannot answer.** Stefan can reliably tell a bird
+from a bike brake; he cannot identify species by ear. A single yes/no on "is this a
+Blackbird?" forced "I don't know" to be recorded as "no", which is the §2d failure aimed at
+the one table the life list is built from — and it threw away the answer that carries most
+of the value, because the actual problem is the false-positive mass, not the species labels.
+
+**Two questions.**
+
+- *Is there really an animal here?* — answerable every time. `is_genuine`.
+- *Is it this species?* — often not. `is_species`, and `unsure` here means **"something
+  real, but I don't know what"**: a true, useful answer, explicitly **not** a rejection.
+
+Deliberately **not** called `is_bird`: `taxon.group` exists so non-birds are not a breaking
+change (API.md §1) and the station already carries Orthoptera, so the field is named for
+the question it asks and the UI phrases it from the group — "is this really an insect?".
+
+**The life list is tiered so it cannot overstate what was supplied**: `machine` (never
+looked at), `bird` (a human confirmed something real, not which species), `species` (a
+human identified it — the only life tick), `rejected`. If what was actually said was
+"that's a bird", the list must not claim a species confirmation.
+
+**Nothing persisted is keyed on `bout_id`.** A bout is a read-time projection of
+`bout_gap_s`; move that and bouts merge or split and their ids move with them, so a verdict
+stored against one would silently reattach to different audio. Verdicts are written per
+detection id — one row per detection in the bout — which yields exactly the right behaviour
+when the projection changes: a bout that **splits** leaves both halves verified, and two
+that **merge** leave a part-decided bout, reported as `partial` and never rounded to done or
+not-done. `bout_id` is display and in-session position only.
+
+**A list, not a queue.** The old flow launched and advanced through items one at a time; a
+flow with no visible end does not get started. Now: a list showing what each species would
+cost (`12 of 20 left`), ordered by stakes — possible new species first (a wrong 38th magpie
+costs nothing, a wrong new species permanently corrupts the list), then implausible for here
+and now, then boundary cases near threshold — grouped by species, because a batch of one
+species is one mental context and jumping between them forces re-orientation on every item.
+Tap a species, do that species, come back. **Nothing auto-advances into the next species**,
+and finishing one lands on a stopping point with a single button back to the list.
+Resumability is free, because progress is the persisted verdicts rather than session state.
+
+**Bulk accept is server-enforced.** Offered only once a species is on the life list and at
+least two of its bouts have been confirmed individually; a first record decided in a swipe
+is precisely the judgement that must not be made that way. The client hides the button and
+the station refuses the request, because a rule only the client applies is not a rule.
+
+**Ergonomics**: play control and verdict buttons together at the bottom, full width, on the
+48 px touch floor — this is used one-handed on a sofa. The three answers are stacked rather
+than laid out as a grid of equal tiles, because they are not equivalent choices and a row of
+tiles invites tapping the middle one.
+
+**`GET /api/data/export`** was added alongside: the API has had a `DELETE` that wipes
+everything from the beginning and no way to take a copy first, and the phone cannot be
+reached from a laptop. The export checkpoints the WAL and holds a transaction across the
+copy, so it is a consistent snapshot rather than a database missing its most recent writes.
 
 ### 11n. Measured performance
 

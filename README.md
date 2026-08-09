@@ -144,6 +144,22 @@ uninstall, and an uninstall takes `station.db` and the models with it.
 `versionCode` comes from the CI run number (`STATION_VERSION_CODE`), defaulting to `1`
 locally. Sideloading an update requires it to increase.
 
+## Resetting the station — and the one way not to
+
+**Use the dashboard: Settings → Clear all data (`DELETE /api/data`).** It deletes detections
+and clip files and keeps what it should — the life list is human decisions and survives
+unless you ask for it explicitly.
+
+**Never use Android's Settings → Apps → Storage → "Clear storage".** That wipes the app's
+external files directory, which is where the two BirdNET `.tflite` models live (~67 MB,
+gitignored, not in the APK). Restoring them needs a cable and a computer, which is the
+whole thing this deployment is built to avoid. "Clear cache" is harmless; "Clear storage"
+is not.
+
+Take a copy first if there is anything worth keeping: **Settings → Download database**
+(`GET /api/data/export`) pulls `station.db` — detections, verdicts and the life list — over
+the LAN to whatever device you are holding. There is no other route off the phone.
+
 ## Updating the dashboard without reinstalling
 
 The dashboard's `index.html` and `tokens.css` are served from

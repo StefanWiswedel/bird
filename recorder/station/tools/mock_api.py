@@ -740,6 +740,149 @@ def day_bouts_body(datestr, taxon_key):
             "count": len(bouts), "bouts": bouts}
 
 
+# --------------------------------------------------------------------------- verification
+
+# detection_id -> (is_genuine, is_species). In memory: the mock is a scratchpad, and a
+# verdict surviving a restart would make the triage list impossible to re-exercise.
+VERDICTS = {}
+# scientific_name -> candidate | bird | confirmed | rejected
+SPECIES_TIER = {}
+FIRST_CONFIRMED = {}
+
+RARITY_PRIOR = 0.02
+BOUNDARY_BAND = 0.10
+BULK_MIN_CONFIRMED = 2
+
+
+def life_tier(status):
+    return {"confirmed": "species", "bird": "bird", "rejected": "rejected"}.get(status, "machine")
+
+
+def mock_prior(sp):
+    """A stand-in local-occurrence prior. Species flagged off-checklist or out of season
+    get a low one so the triage ordering has something real to sort on."""
+    if not sp[9]:
+        return 0.004
+    if not sp[10]:
+        return 0.011
+    return 0.02 + (sp[6] / 400.0)
+
+
+def apply_verdict(scientific, is_genuine, is_species):
+    """Tier precedence, mirroring Database.applySpeciesTier: confirmed > rejected > bird."""
+    if FIRST_CONFIRMED.get(scientific):
+        return                                   # a life tick is never downgraded
+    if is_genuine == "yes" and is_species == "yes":
+        SPECIES_TIER[scientific] = "confirmed"
+        FIRST_CONFIRMED[scientific] = iso(now_ms())
+    elif is_genuine == "no" or is_species == "no":
+        SPECIES_TIER[scientific] = "rejected"
+    elif is_genuine == "yes":
+        # "A bird, but I don't know what" — real information, and NOT a rejection.
+        if SPECIES_TIER.get(scientific, "candidate") == "candidate":
+            SPECIES_TIER[scientific] = "bird"
+
+
+def annotate_verification(bout):
+    ids = bout["detection_ids"]
+    judged = [i for i in ids if i in VERDICTS]
+    answers = {VERDICTS[i] for i in judged}
+    bout["verification"] = {
+        "state": "none" if not judged else ("done" if len(judged) == len(ids) else "partial"),
+        "verified_detections": len(judged),
+        "is_genuine": list(answers)[0][0] if len(answers) == 1 else None,
+        "is_species": list(answers)[0][1] if len(answers) == 1 else None,
+    }
+    return bout
+
+
+def bouts_for_species(taxon_key):
+    st = settings_snapshot()
+    rows = [r for r in visible_rows() if r["sp"][0] == taxon_key and r["conf"] >= st["retention_floor"]]
+    return [annotate_verification(b) for b in bouts_of(rows, st)]
+
+
+def triage_body():
+    st = settings_snapshot()
+    out = []
+    keys = {}
+    for r in visible_rows():
+        keys.setdefault(r["sp"][0], r["sp"])
+    for key, sp in keys.items():
+        bouts = bouts_for_species(key)
+        pending = [b for b in bouts if b["verification"]["state"] != "done"]
+        if not bouts or not pending:
+            continue
+        tier = life_tier(SPECIES_TIER.get(sp[1], "candidate"))
+        if tier == "rejected":
+            continue
+        prior = mock_prior(sp)
+        peak = max(b["peak_confidence"] for b in bouts)
+        thr = bouts[0]["threshold"]
+        would_be_lifer = not FIRST_CONFIRMED.get(sp[1])
+        implausible = prior < RARITY_PRIOR or not sp[9]
+        boundary = any(abs(b["peak_confidence"] - thr) <= BOUNDARY_BAND for b in bouts)
+        if would_be_lifer:
+            stake, reason = "lifer", "would be new on the life list"
+        elif implausible:
+            stake, reason = "implausible", "rare here this week"
+        elif boundary:
+            stake, reason = "boundary", "sits near the threshold"
+        else:
+            stake, reason = "routine", "already on the life list"
+        bins = solar_day(local_date(bouts[0]["start_ms"]))
+        activity = [0] * 6
+        for b in bouts:
+            activity[bin_of(bins, b["start_ms"])] += 1
+        done = len(bouts) - len(pending)
+        out.append({
+            "taxon": taxon_of(sp), "life_tier": tier,
+            "bouts_total": len(bouts), "bouts_done": done, "bouts_pending": len(pending),
+            "peak_confidence": peak, "threshold": thr,
+            "prior": prior, "rarity_flag": prior < RARITY_PRIOR,
+            "would_be_lifer": would_be_lifer,
+            "stake": stake, "stake_reason": reason,
+            "bulk_allowed": bool(FIRST_CONFIRMED.get(sp[1])) and done >= BULK_MIN_CONFIRMED,
+            "last_ms": max(b["end_ms"] for b in bouts),
+            "activity": activity,
+            "photo": dict(PHOTO_META, url="/api/photo/" + key) if key not in NO_PHOTO_KEYS else None,
+        })
+    rank = {"lifer": 0, "implausible": 1, "boundary": 2, "routine": 3}
+    out.sort(key=lambda s: (rank.get(s["stake"], 9), -s["peak_confidence"]))
+    return {"schema": SCHEMA, "count": len(out), "species": out,
+            "priors_available": True,
+            "bouts_pending": sum(s["bouts_pending"] for s in out),
+            "life_list_size": sum(1 for v in SPECIES_TIER.values() if v == "confirmed")}
+
+
+def life_list_body():
+    seen = {}
+    for r in visible_rows():
+        sp = r["sp"]
+        e = seen.setdefault(sp[1], {"sp": sp, "n": 0, "first": r["ts"]})
+        e["n"] += 1
+        e["first"] = min(e["first"], r["ts"])
+    species = []
+    for sci, e in seen.items():
+        sp = e["sp"]
+        status = SPECIES_TIER.get(sci, "candidate")
+        species.append({
+            "scientific": sci, "common": sp[2], "status": status,
+            "life_tier": life_tier(status),
+            "first_detected_at": iso(e["first"]),
+            "first_confirmed_at": FIRST_CONFIRMED.get(sci),
+            "lifer_detection_id": None, "best_detection_id": None,
+            "total_detections": e["n"],
+            "photo": dict(PHOTO_META, url="/api/photo/" + sp[0]) if sp[0] not in NO_PHOTO_KEYS else None,
+        })
+    species.sort(key=lambda s: (s["status"] != "confirmed", s["common"]))
+    counts = {"species": 0, "bird": 0, "rejected": 0, "machine": 0}
+    for s in species:
+        counts[s["life_tier"]] += 1
+    return {"schema": SCHEMA, "confirmed_count": counts["species"], "count": len(species),
+            "tier_counts": counts, "species": species, "station": dict(STATION)}
+
+
 def species_body():
     st = settings_snapshot()
     agg = {}
@@ -869,6 +1012,62 @@ class Handler(BaseHTTPRequestHandler):
             body, code = dashboard_update_body()
             return self._json(body, code)
 
+        if path in ("/api/verify/bout", "/api/verify/bulk"):
+            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                return self._json({"error": "bad json"}, 400)
+            ids = body.get("detection_ids") or []
+            if not isinstance(ids, list) or not ids:
+                return self._json({"error": "detection_ids must be a non-empty array"}, 400)
+
+            if path == "/api/verify/bulk":
+                key = body.get("taxon_key") or ""
+                sci = next((s[1] for s in SPECIES if s[0] == key), None)
+                bouts = bouts_for_species(key)
+                done = sum(1 for b in bouts if b["verification"]["state"] == "done")
+                # Server-enforced, not merely hidden in the UI: "never for a species not yet
+                # on the life list" is a rule about the data.
+                if not FIRST_CONFIRMED.get(sci):
+                    return self._json({"error": "not_established", "reason":
+                        "This species is not on the life list yet. A first record is not a "
+                        "judgement to make in bulk — confirm one bout on its own first."}, 409)
+                if done < BULK_MIN_CONFIRMED:
+                    return self._json({"error": "too_few_confirmed", "reason":
+                        "Confirm at least %d bouts of this species individually before "
+                        "accepting the rest in bulk." % BULK_MIN_CONFIRMED}, 409)
+                is_genuine, is_species = "yes", "yes"
+            else:
+                is_genuine = body.get("is_genuine")
+                is_species = body.get("is_species")
+                if is_genuine not in ("yes", "no", "unsure"):
+                    return self._json({"error": "is_genuine must be yes|no|unsure"}, 400)
+                if is_species is not None and is_species not in ("yes", "no", "unsure"):
+                    return self._json({"error": "is_species must be yes|no|unsure or null"}, 400)
+
+            row = next((r for r in ROWS if r["id"] == ids[0]), None)
+            if row is None:
+                return self._json({"error": "no such detection"}, 404)
+            sci = row["sp"][1]
+            with LOCK:
+                for i in ids:
+                    VERDICTS[i] = (is_genuine, is_species)
+                was_confirmed = bool(FIRST_CONFIRMED.get(sci))
+                apply_verdict(sci, is_genuine, is_species)
+            status = SPECIES_TIER.get(sci, "candidate")
+            return self._json({
+                "schema": SCHEMA, "scientific": sci, "common": row["sp"][2],
+                "status": status, "life_tier": life_tier(status),
+                "is_genuine": is_genuine, "is_species": is_species,
+                "detections_recorded": len(ids),
+                "first_confirmed_at": FIRST_CONFIRMED.get(sci),
+                # A life tick ONLY for a species identification — never for "it's a bird".
+                "is_lifer": is_genuine == "yes" and is_species == "yes" and not was_confirmed,
+                "life_list_size": sum(1 for v in SPECIES_TIER.values() if v == "confirmed"),
+                "bulk": path.endswith("bulk"),
+            })
+
         if path == "/api/settings":
             n = int(self.headers.get("Content-Length") or 0)
             try:
@@ -946,6 +1145,44 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self._json({"error": "bad date"}, 400)
             return self._json(summary_body(d))
+
+        if path == "/api/data/export":
+            # A real SQLite header so the browser and `file` agree it is a database; the
+            # mock has no actual store to dump.
+            blob = b"SQLite format 3\x00" + b"\x00" * 4080
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.sqlite3")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="station-%s.db"' % local_date(now_ms()))
+            self.send_header("Content-Length", str(len(blob)))
+            self.send_header("Cache-Control", "no-store")
+            self._cors()
+            self.end_headers()
+            return self.wfile.write(blob)
+
+        if path == "/api/verify/species":
+            return self._json(triage_body())
+
+        if path == "/api/verify/bouts":
+            key = (q.get("taxon_key") or [""])[0]
+            if not key:
+                return self._json({"error": "taxon_key is required"}, 400)
+            bouts = bouts_for_species(key)
+            pending = [b for b in bouts if b["verification"]["state"] != "done"]
+            sci = next((s[1] for s in SPECIES if s[0] == key), None)
+            done = len(bouts) - len(pending)
+            # Undecided first — that is the work — then the decided ones.
+            bouts.sort(key=lambda b: (b["verification"]["state"] == "done", -b["start_ms"]))
+            return self._json({
+                "schema": SCHEMA, "taxon_key": key, "count": len(bouts),
+                "bouts_pending": len(pending),
+                "life_tier": life_tier(SPECIES_TIER.get(sci, "candidate")),
+                "bulk_allowed": bool(FIRST_CONFIRMED.get(sci)) and done >= BULK_MIN_CONFIRMED,
+                "bouts": bouts,
+            })
+
+        if path == "/api/life-list":
+            return self._json(life_list_body())
 
         if path == "/api/day/species":
             d = (q.get("date") or [local_date(now_ms())])[0]

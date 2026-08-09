@@ -102,7 +102,18 @@ data class Bout(
     val threshold: Float,
     val aboveThreshold: Boolean,
     val clips: List<BoutClip>,
-    val audio: BoutAudio
+    val audio: BoutAudio,
+    /**
+     * How much of this bout has been judged. Verdicts are stored per DETECTION, so when
+     * `bout_gap_s` moves and two decided bouts merge, the result is genuinely part-decided
+     * — `partial` says so instead of rounding to done or not-done.
+     */
+    val verifiedDetections: Int = 0,
+    val verifyState: String = "none",       // none | partial | done
+    /** The answer given, when every judged detection here agrees. Null when they disagree
+     *  (a merged bout carrying two different verdicts) or nothing is judged yet. */
+    val verdictIsGenuine: String? = null,
+    val verdictIsSpecies: String? = null
 )
 
 /** One species on one day: the row of the day list. */
@@ -137,7 +148,7 @@ data class DaySummaryData(
  * (API.md §1 "Field rules that matter"). Rows below `retentionFloor` are never written
  * at all; that is the one setting applied at WRITE time, and the asymmetry is by design.
  */
-class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station.db", null, 6) {
+class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station.db", null, 7) {
 
     /**
      * The life list, its evidence, and the local-occurrence prior.
@@ -161,15 +172,7 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
                 station             TEXT NOT NULL
             )
         """.trimIndent())
-        db.execSQL("""
-            CREATE TABLE verifications (
-                detection_id  INTEGER NOT NULL,
-                verdict       TEXT NOT NULL,
-                verified_at   TEXT NOT NULL,
-                note          TEXT
-            )
-        """.trimIndent())
-        db.execSQL("CREATE INDEX idx_verif_det ON verifications(detection_id)")
+        createVerifications(db)
         db.execSQL("""
             CREATE TABLE species_prior (
                 scientific_name  TEXT NOT NULL,
@@ -201,6 +204,31 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             ).use { while (it.moveToNext()) out.add(it.getLong(0)) }
         }
         return out
+    }
+
+    /** One definition, used by onCreate and by the v7 rebuild — two copies of a schema
+     *  are two schemas waiting to disagree. */
+    private fun createVerifications(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE verifications (
+                detection_id  INTEGER NOT NULL,
+                -- TWO QUESTIONS, TWO COLUMNS. "Is there really an animal here?" is
+                -- answerable every time and is where nearly all the value is, because the
+                -- false-positive mass is the actual problem; "is it THIS species?" often is
+                -- not, and "something real, but I don't know what" is a true answer. One
+                -- boolean recorded that as "no", which put a judgement nobody made into the
+                -- table the life list is built from (§2d).
+                --
+                -- NOT `is_genuine`: taxon.group exists so non-birds are not a breaking change
+                -- (API.md §1), and the station already carries Orthoptera. The question is
+                -- "real animal or noise?" and the column is named for that.
+                is_genuine    TEXT NOT NULL,          -- yes | no | unsure
+                is_species    TEXT,                   -- yes | no | unsure, null if not asked
+                verified_at   TEXT NOT NULL,
+                note          TEXT
+            )
+        """.trimIndent())
+        db.execSQL("CREATE INDEX idx_verif_det ON verifications(detection_id)")
     }
 
     private fun createDetections(db: SQLiteDatabase) {
@@ -314,6 +342,33 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
             // written before any of this existed, rather than a fabricated zero.
             db.execSQL("ALTER TABLE detections ADD COLUMN clip_start_ms INTEGER")
         }
+        if (oldVersion < 7) {
+            // THE VERDICT SPLITS IN TWO — see the table definition for why.
+            //
+            // The table is REBUILT into the correct shape rather than having columns bolted
+            // onto the old one, because there is no live station to upgrade: this project's
+            // only deployment starts from an empty database at v7. Carrying a vestigial
+            // `verdict` column forever to smooth a migration nobody will run would be the
+            // wrong trade.
+            //
+            // Existing verdicts are still MIGRATED, not dropped. They are human decisions,
+            // and the standing rule in this file is about not destroying those (see the v4
+            // note on pinnedDetectionIds) — it holds whether or not any rows exist today.
+            // The old single verdict maps conservatively: only "yes" was ever a species
+            // identification, and "unsure" never asserted bird-ness, so it does not become
+            // one here.
+            db.execSQL("ALTER TABLE verifications RENAME TO verifications_v6")
+            createVerifications(db)
+            db.execSQL("""
+                INSERT INTO verifications (detection_id, is_genuine, is_species, verified_at, note)
+                SELECT detection_id,
+                       CASE verdict WHEN 'yes' THEN 'yes' WHEN 'no' THEN 'no' ELSE 'unsure' END,
+                       CASE verdict WHEN 'yes' THEN 'yes' WHEN 'no' THEN 'no' ELSE NULL END,
+                       verified_at, note
+                FROM verifications_v6
+            """.trimIndent())
+            db.execSQL("DROP TABLE verifications_v6")
+        }
     }
 
     /**
@@ -416,6 +471,21 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
          *  not "make it impossible" (DESIGN §4's rule against ever silently dropping a
          *  class outright). */
         const val MAX_EFFECTIVE_THRESHOLD = 0.99f
+
+        /** Below this local-occurrence prior a species is treated as implausible here and
+         *  jumps the triage queue. Same provisional number the rarity flag uses — a guess
+         *  until the distribution of priors at this station can actually be looked at. */
+        const val RARITY_PRIOR = 0.02
+
+        /** How close to its threshold a bout has to be to count as a boundary case. These
+         *  are the ones that locate the decision boundary, which is why they outrank
+         *  routine work — and why PR 4's learned thresholds will want them first. */
+        const val BOUNDARY_BAND = 0.10f
+
+        /** Confirmed bouts a species needs before bulk accept is offered at all. Two is
+         *  not a statistical bar, it is "you have already listened to this bird here more
+         *  than once", which is the condition under which agreeing in bulk is honest. */
+        const val BULK_MIN_CONFIRMED = 2
 
         /** BirdNET's 11 acoustic-context classes — build_station_species.py's
          *  NON_TAXON_LABELS, by taxon_key (its slug() function). Every query over
@@ -646,13 +716,21 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
                 expected > 0 -> "unavailable"
                 else -> "none"
             }
+            val ids = g.map { it.id }
+            val verdicts = verdictsFor(ids)
+            val judged = ids.count { it in verdicts }
+            val distinct = verdicts.values.toSet()
             Bout(
                 boutId = first.id, taxon = first.taxon,
                 startMs = first.detectedAtMs, endMs = g.last().detectedAtMs,
-                detectionCount = g.size, detectionIds = g.map { it.id },
+                detectionCount = g.size, detectionIds = ids,
                 peakConfidence = peak, threshold = threshold, aboveThreshold = peak >= threshold,
                 clips = clips,
-                audio = BoutAudio(state, clips.sumOf { it.seconds }, covered, expected)
+                audio = BoutAudio(state, clips.sumOf { it.seconds }, covered, expected),
+                verifiedDetections = judged,
+                verifyState = when { judged == 0 -> "none"; judged < ids.size -> "partial"; else -> "done" },
+                verdictIsGenuine = distinct.singleOrNull()?.first,
+                verdictIsSpecies = distinct.singleOrNull()?.second
             )
         }.sortedByDescending { it.startMs }
     }
@@ -725,6 +803,147 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
                 }
             )
         }.sortedWith(compareByDescending<DaySpecies> { it.boutsAboveThreshold }.thenByDescending { it.bouts })
+    }
+
+    // ------------------------------------------------------------------ verification triage
+
+    /** One species on the triage list: what it would cost, and what is at stake. */
+    data class TriageSpecies(
+        val taxon: Taxon, val tier: String,
+        val boutsTotal: Int, val boutsDone: Int, val boutsPending: Int,
+        val peakConfidence: Float, val threshold: Float,
+        val prior: Double?, val wouldBeLifer: Boolean,
+        val stake: String, val stakeReason: String,
+        val activity: IntArray, val bulkAllowed: Boolean,
+        val lastMs: Long
+    )
+
+    /** Every bout of one species across all days, newest first. */
+    fun boutsForSpecies(taxonKey: String, settings: Settings, limit: Int = 300): List<Bout> {
+        val c = readableDatabase.rawQuery(
+            "SELECT * FROM detections WHERE taxon_key = ? AND confidence >= ? " +
+            "AND taxon_group != 'non_taxon' AND taxon_key NOT IN ($NON_TAXON_KEYS_SQL) " +
+            "ORDER BY detected_at_ms DESC LIMIT ?",
+            arrayOf(taxonKey, settings.retentionFloor.toString(), (limit * 20).toString()))
+        val rows = c.use { readRows(it) }
+        if (rows.isEmpty()) return emptyList()
+        val prior = priorsForWeek(weekOf(rows.first().detectedAtMs))[rows.first().taxon.scientific]
+        return boutsOf(rows, settings, speciesThresholdOverrides(), prior, System.currentTimeMillis())
+            .take(limit)
+    }
+
+    /**
+     * The triage list: species with bouts still undecided, ordered by what is at stake.
+     *
+     * ORDERED BY STAKES, NOT CHRONOLOGY, and grouped by species. A wrong 38th magpie costs
+     * nothing; a wrong new species permanently corrupts the life list. Doing one species at
+     * a time is also one mental context — jumping between species forces re-orientation on
+     * every item, which is what made the old one-at-a-time queue exhausting.
+     */
+    fun triageSpecies(settings: Settings, lat: Double, lon: Double, limit: Int = 60): List<TriageSpecies> {
+        val overrides = speciesThresholdOverrides()
+        val statuses = lifeList().associateBy { it.scientific }
+        val solarCache = HashMap<String, Solar.Day>()
+        val priorCache = HashMap<Int, Map<String, Double>>()
+        val now = System.currentTimeMillis()
+
+        // Distinct taxa above the retention floor, most recent first — the candidate pool.
+        val keys = ArrayList<String>()
+        readableDatabase.rawQuery(
+            "SELECT taxon_key, MAX(detected_at_ms) AS last_ms FROM detections " +
+            "WHERE confidence >= ? AND taxon_group != 'non_taxon' AND taxon_key NOT IN ($NON_TAXON_KEYS_SQL) " +
+            "GROUP BY taxon_key ORDER BY last_ms DESC LIMIT ?",
+            arrayOf(settings.retentionFloor.toString(), (limit * 3).toString())
+        ).use { while (it.moveToNext()) keys.add(it.getString(0)) }
+
+        val out = ArrayList<TriageSpecies>()
+        for (key in keys) {
+            val bouts = boutsForSpecies(key, settings)
+            if (bouts.isEmpty()) continue
+            val pending = bouts.count { it.verifyState != "done" }
+            if (pending == 0) continue
+            val taxon = bouts.first().taxon
+            val status = statuses[taxon.scientific]
+            val tier = lifeTier(status?.status)
+            if (tier == "rejected") continue      // already refused; not asking again
+            val prior = priorCache.getOrPut(weekOf(bouts.first().startMs)) {
+                priorsForWeek(weekOf(bouts.first().startMs))
+            }[taxon.scientific]
+            val peak = bouts.maxOf { it.peakConfidence }
+            val threshold = bouts.first().threshold
+            val wouldBeLifer = status?.firstConfirmedAt == null
+
+            // The order the spec calls for, in the order it calls for it.
+            // Implausible here and now: a local-occurrence prior far below what the
+            // station normally hears, or a species off the Danish checklist entirely.
+            val implausible = (prior != null && prior < RARITY_PRIOR) || !taxon.regional
+            val boundary = bouts.any { kotlin.math.abs(it.peakConfidence - threshold) <= BOUNDARY_BAND }
+            val (stake, reason) = when {
+                wouldBeLifer -> "lifer" to "would be new on the life list"
+                implausible -> "implausible" to (if (prior != null) "rare here this week" else "off the local checklist")
+                boundary -> "boundary" to "sits near the threshold"
+                else -> "routine" to "already on the life list"
+            }
+
+            val activity = IntArray(6)
+            for (b in bouts) {
+                val date = Detection.localDate(b.startMs)
+                val day = solarCache.getOrPut(date) { Solar.forDate(date, lat, lon) }
+                activity[Solar.binOf(day, b.startMs)]++
+            }
+            out += TriageSpecies(
+                taxon = taxon, tier = tier,
+                boutsTotal = bouts.size, boutsDone = bouts.size - pending, boutsPending = pending,
+                peakConfidence = peak, threshold = threshold,
+                prior = prior, wouldBeLifer = wouldBeLifer,
+                stake = stake, stakeReason = reason,
+                activity = activity,
+                // BULK ACCEPT IS NEVER OFFERED FOR A SPECIES NOT YET ON THE LIST. Deciding a
+                // first record in a swipe is exactly the judgement that must not be made
+                // that way; once a species is established, agreeing that six more bouts are
+                // the same bird is ordinary work.
+                bulkAllowed = status?.firstConfirmedAt != null && (bouts.size - pending) >= BULK_MIN_CONFIRMED,
+                lastMs = bouts.maxOf { it.endMs }
+            )
+            if (out.size >= limit) break
+        }
+        val rank = mapOf("lifer" to 0, "implausible" to 1, "boundary" to 2, "routine" to 3)
+        return out.sortedWith(
+            compareBy<TriageSpecies> { rank[it.stake] ?: 9 }.thenByDescending { it.peakConfidence })
+    }
+
+    /**
+     * A consistent byte-for-byte copy of station.db, for `GET /api/data/export`.
+     *
+     * WHY THIS EXISTS AT ALL: the API has had a DELETE that wipes everything since the
+     * beginning and no way to get a copy off. The phone cannot be reached from a laptop —
+     * it is behind NAT and there is no adb — so the only route out is a download the
+     * dashboard can start. Nothing is at risk today because the database is empty; the
+     * point is that it should exist *before* something is.
+     *
+     * CONSISTENCY, not just a file copy. SQLiteOpenHelper runs in WAL mode, so the bytes
+     * on disk are only half the story and copying `station.db` alone can produce a
+     * database missing its most recent writes — which would look like a successful export
+     * and be a truncated one (§2d). So: checkpoint the WAL into the main file, and hold a
+     * transaction across the copy so nothing in this process can write mid-read.
+     */
+    fun exportTo(dest: File): Long {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { it.moveToFirst() }
+            File(db.path).inputStream().use { ins -> dest.outputStream().use { ins.copyTo(it) } }
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+        return dest.length()
+    }
+
+    /** species_status.status -> the life-list tier the API reports. */
+    fun lifeTier(status: String?): String = when (status) {
+        "confirmed" -> "species"     // a human named it: the only tier that is a life tick
+        "bird" -> "bird"             // a human confirmed a bird, not which one
+        "rejected" -> "rejected"
+        else -> "machine"            // proposed by the model, never looked at
     }
 
     /** Solar bin edges for a date, so the API can label the strip it just sent. */
@@ -1003,43 +1222,136 @@ class Database(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "station
     }
 
     /**
-     * A human verdict on one detection. 'yes' is the only thing that can create a lifer.
-     *
      * first_confirmed_at and lifer_detection_id are written ONCE and never moved: the
      * lifer moment is a fact about when it happened, not a running maximum.
      */
-    fun recordVerification(detectionId: Long, verdict: String, note: String?): SpeciesStatus? {
+    /**
+     * The two-part verdict, recorded against DETECTION IDS — never against a bout id.
+     *
+     * A bout is a read-time projection of `bout_gap_s`; move that setting and bouts merge
+     * or split and their ids move with them. Persisting a judgement against one would
+     * silently reattach it to different audio. Detection ids are stable, so the verdict for
+     * a bout is written once per detection in it, which also gives the right behaviour when
+     * the projection changes: a bout that later SPLITS leaves both halves verified, and two
+     * that MERGE leave a partially-verified bout — which is displayed as exactly that
+     * rather than rounded to done or not-done.
+     *
+     * THE TWO QUESTIONS ARE NOT THE SAME QUESTION.
+     *  - [isGenuine] "is this a bird at all?" — answerable every time, and where nearly all
+     *    the value is, because the false-positive mass is the actual problem.
+     *  - [isSpecies] "is it *this* species?" — often unanswerable, and `"unsure"` is a real
+     *    answer meaning "a bird, but I don't know what". That is NOT a rejection and must
+     *    never be stored as one.
+     *
+     */
+    fun recordBoutVerdict(detectionIds: List<Long>, isGenuine: String, isSpecies: String?,
+                          note: String?): SpeciesStatus? {
+        if (detectionIds.isEmpty()) return null
         val db = writableDatabase
-        val row = readableDatabase.rawQuery(
-            "SELECT taxon_scientific, taxon_common, detected_at_ms FROM detections WHERE id = ?",
-            arrayOf(detectionId.toString())
-        ).use { if (it.moveToFirst()) Triple(it.getString(0), it.getString(1), it.getLong(2)) else null }
-            ?: return null
+        val scientific = readableDatabase.rawQuery(
+            "SELECT taxon_scientific FROM detections WHERE id = ?",
+            arrayOf(detectionIds.first().toString())
+        ).use { if (it.moveToFirst()) it.getString(0) else null } ?: return null
 
-        db.insert("verifications", null, ContentValues().apply {
-            put("detection_id", detectionId); put("verdict", verdict)
-            put("verified_at", Detection.iso(System.currentTimeMillis()))
-            if (note != null) put("note", note)
-        })
-        if (verdict == "yes") {
-            val already = readableDatabase.rawQuery(
-                "SELECT first_confirmed_at FROM species_status WHERE scientific_name = ?", arrayOf(row.first)
-            ).use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
-            if (already == null) {
+        val at = Detection.iso(System.currentTimeMillis())
+        db.beginTransaction()
+        try {
+            for (id in detectionIds) {
+                db.insert("verifications", null, ContentValues().apply {
+                    put("detection_id", id)
+                    put("is_genuine", isGenuine)
+                    put("is_species", isSpecies)
+                    put("verified_at", at)
+                    if (note != null) put("note", note)
+                })
+            }
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+
+        applySpeciesTier(scientific, isGenuine, isSpecies, detectionIds.first(), at)
+        return speciesStatus(scientific)
+    }
+
+    /**
+     * Move a species between life-list tiers after a verdict.
+     *
+     * TIERS EXIST SO THE LIST CANNOT OVERSTATE WHAT WAS SUPPLIED. If what a human actually
+     * said was "that's a bird", the list must not claim a species confirmation — §2d
+     * applied to the one artefact the whole station is for.
+     *
+     *   candidate  machine-proposed, no human has looked
+     *   bird       a human confirmed a real bird here, but not which species
+     *   confirmed  a human confirmed the species — the only tier that is a life tick
+     *   rejected   a human said no
+     *
+     * Precedence is confirmed > rejected > bird > candidate, and confirmation is one-way:
+     * one bad clip must not retract a lifer earned from a good one.
+     */
+    private fun applySpeciesTier(scientific: String, isGenuine: String, isSpecies: String?,
+                                 detectionId: Long, at: String) {
+        val db = writableDatabase
+        val confirmedAlready = readableDatabase.rawQuery(
+            "SELECT first_confirmed_at FROM species_status WHERE scientific_name = ?", arrayOf(scientific)
+        ).use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
+
+        if (isGenuine == "yes" && isSpecies == "yes") {
+            if (confirmedAlready == null) {
                 db.update("species_status", ContentValues().apply {
                     put("status", "confirmed")
-                    put("first_confirmed_at", Detection.iso(System.currentTimeMillis()))
+                    put("first_confirmed_at", at)
                     put("lifer_detection_id", detectionId)
-                }, "scientific_name = ?", arrayOf(row.first))
+                }, "scientific_name = ?", arrayOf(scientific))
             }
-        } else if (verdict == "no") {
-            // A rejection marks the SPECIES rejected only while it has never been confirmed;
-            // one bad clip must not retract a lifer earned from a good one.
-            db.update("species_status", ContentValues().apply { put("status", "rejected") },
-                "scientific_name = ? AND first_confirmed_at IS NULL", arrayOf(row.first))
+            return
         }
-        return speciesStatus(row.first)
+        if (confirmedAlready != null) return    // already a life tick; nothing below downgrades it
+
+        when {
+            // Not a bird, or a bird that is not this species: the SPECIES claim is refused.
+            isGenuine == "no" || isSpecies == "no" ->
+                db.update("species_status", ContentValues().apply { put("status", "rejected") },
+                    "scientific_name = ? AND first_confirmed_at IS NULL", arrayOf(scientific))
+            // "A bird, but I don't know what." Real information, and explicitly not a
+            // rejection — it promotes the species out of machine-proposed and no further.
+            isGenuine == "yes" ->
+                db.update("species_status", ContentValues().apply { put("status", "bird") },
+                    "scientific_name = ? AND status = 'candidate'", arrayOf(scientific))
+            // isGenuine == "unsure": the observer could not tell. Nothing is claimed either
+            // way, and the species stays exactly where it was.
+        }
     }
+
+    /** detection id -> (is_genuine, is_species) for the newest verdict on each. */
+    fun verdictsFor(ids: List<Long>): Map<Long, Pair<String, String?>> {
+        if (ids.isEmpty()) return emptyMap()
+        val out = HashMap<Long, Pair<String, String?>>()
+        // The v7 migration normalises pre-existing rows into these columns, so there is
+        // no legacy shape to interpret here — one representation, one reader.
+        readableDatabase.rawQuery(
+            "SELECT detection_id, is_genuine, is_species FROM verifications " +
+            "WHERE detection_id IN (${ids.joinToString(",")}) ORDER BY verified_at ASC", null
+        ).use {
+            while (it.moveToNext()) {
+                out[it.getLong(0)] = it.getString(1) to (if (it.isNull(2)) null else it.getString(2))
+            }
+        }
+        return out
+    }
+
+    /**
+     * The single-detection verdict behind the legacy `POST /api/verify/{id}`.
+     *
+     * Kept so an older dashboard still works against a new station, and expressed in terms
+     * of the two-part verdict rather than duplicating the tier logic: `yes` was always a
+     * species identification, `no` a rejection, and `unsure` never asserted bird-ness — so
+     * it does not become one here.
+     */
+    fun recordVerification(detectionId: Long, verdict: String, note: String?): SpeciesStatus? =
+        when (verdict) {
+            "yes" -> recordBoutVerdict(listOf(detectionId), "yes", "yes", note)
+            "no" -> recordBoutVerdict(listOf(detectionId), "no", null, note)
+            else -> recordBoutVerdict(listOf(detectionId), "unsure", null, note)
+        }
 
     /**
      * Species a human has explicitly rejected.

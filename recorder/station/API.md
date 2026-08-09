@@ -125,6 +125,11 @@ this is a LAN appliance the user opens from whatever device is to hand.
 | GET | `/api/events` | SSE stream (live feed) |
 | GET/POST | `/api/settings` | thresholds, applied at read time |
 | POST | `/api/species/{key}/threshold` | set/bump/clear one species' threshold override |
+| GET | `/api/verify/species` | the triage list — species with undecided bouts |
+| GET | `/api/verify/bouts` | one species' bouts, undecided first |
+| POST | `/api/verify/bout` | record the two-part verdict for a bout |
+| POST | `/api/verify/bulk` | accept remaining bouts of an established species |
+| GET | `/api/data/export` | download `station.db` |
 | DELETE | `/api/data` | wipe all detections, clip files, and per-species overrides |
 
 ### `GET /api/detections`
@@ -355,6 +360,110 @@ split, and the ids move with them. It is stable for as long as that setting is.
 
 A clip's `url` is keyed on a detection id because that is what `/api/clip/{id}` serves; it
 is not an identity for the clip. Two clips of one bout necessarily carry different ids.
+
+---
+
+## 2c. Verification: two questions, and what may be persisted
+
+**Nothing persisted is ever keyed on `bout_id`.** A bout is a read-time projection of
+`bout_gap_s`; move that setting and bouts merge or split and their ids move with them, so a
+judgement stored against one would silently reattach itself to different audio. Verdicts
+are stored per **detection id**, which is stable. `bout_id` is for display and in-session
+position only.
+
+That choice has visible consequences, and they are the correct ones:
+
+- a bout that later **splits** leaves both halves verified;
+- two that later **merge** leave a genuinely part-decided bout, reported as
+  `verification.state: "partial"` — never rounded to done or not-done.
+
+### The verdict is two questions
+
+| field | values | question |
+|---|---|---|
+| `is_genuine` | `yes` / `no` / `unsure` | is there really an animal here, or is this noise? |
+| `is_species` | `yes` / `no` / `unsure` / `null` | is it *this* species? |
+
+The first is answerable every time and is where nearly all the value is — the
+false-positive mass is the actual problem. The second often is not answerable, and
+`is_genuine: "yes"` with `is_species: "unsure"` — *"something real, but I don't know
+what"* — is a **first-class answer, not a rejection**. Recording it as one would put a
+judgement nobody made into the table the life list is built from (§2d).
+
+`is_species` is only meaningful when `is_genuine` is `yes`, and clients must not ask it
+otherwise: naming a species for something that was not an animal records nonsense.
+
+**Not `is_bird`.** `taxon.group` exists so that non-birds are not a breaking change (§1),
+and the station already carries Orthoptera. The question is "real animal or noise?", the
+field is named for that, and the UI phrases it from `taxon.group`.
+
+### The life list is tiered
+
+`life_tier` on every species, because the list must never claim more than was supplied:
+
+| tier | meaning |
+|---|---|
+| `machine` | proposed by the model; no human has looked |
+| `bird` | a human confirmed something real was here, but not which species |
+| `species` | a human identified the species — **the only tier that is a life tick** |
+| `rejected` | a human said no |
+
+`confirmed_count` keeps its meaning: species ticks only. `tier_counts` reports the rest
+beside it rather than folding them in.
+
+### `GET /api/verify/species`
+
+The triage list. Species with undecided bouts, ordered by what is at stake: `lifer`
+first (a wrong 38th magpie costs nothing; a wrong new species permanently corrupts the
+list), then `implausible` for here and now, then `boundary` cases near threshold, then
+`routine`. Each row reports `bouts_pending` / `bouts_done` / `bouts_total`, so the cost of
+finishing it is visible before starting, and an `activity` strip on the same six
+solar-anchored bins as §2b.
+
+### `GET /api/verify/bouts?taxon_key=…`
+
+That species' bouts, undecided first. Each carries the `verification` block:
+
+```json
+"verification": { "state": "none", "verified_detections": 0,
+                  "is_genuine": null, "is_species": null }
+```
+
+`state` is `none` / `partial` / `done`. `is_genuine` and `is_species` are `null` when the
+judged detections disagree — which is exactly what a merged bout looks like.
+
+### `POST /api/verify/bout`
+
+```json
+{ "detection_ids": [4127, 4131, 4136], "is_genuine": "yes", "is_species": "unsure" }
+```
+
+Writes one verdict per detection id. Responds with the resulting `life_tier`,
+`life_list_size`, and `is_lifer` — which is true **only** for `is_genuine: "yes"` *and*
+`is_species: "yes"`. "Something real, but I don't know what" returns `life_tier: "bird"`
+and `is_lifer: false`.
+
+### `POST /api/verify/bulk`
+
+```json
+{ "taxon_key": "pica_pica", "detection_ids": [ … ] }
+```
+
+Accepts the listed detections as this species in one go. **Refused with `409` for a
+species not yet on the life list** (`error: "not_established"`) or with fewer than two
+bouts already confirmed individually (`error: "too_few_confirmed"`); `reason` is a sentence
+meant to be shown. The rule is enforced here and not merely hidden in the UI — deciding a
+first record in a swipe is precisely the judgement that must not be made that way, and a
+rule only the client applies is not a rule.
+
+### `GET /api/data/export`
+
+Streams `station.db` as `application/vnd.sqlite3` with a `Content-Disposition` filename —
+the counterpart to `DELETE /api/data`, which has existed from the start with no way to take
+a copy first. The phone cannot be reached from a laptop, so a download the dashboard can
+start is the only route off the device. The WAL is checkpointed and a transaction is held
+across the copy, so the file is a consistent snapshot rather than a database missing its
+most recent writes.
 
 ---
 

@@ -458,15 +458,28 @@ class HttpServer(
                 for (s in db.lifeList()) arr.put(JSONObject()
                     .put("scientific", s.scientific).put("common", s.common)
                     .put("status", s.status)
+                    // TIERED, so the list cannot claim more than was actually supplied:
+                    // "machine" was never looked at, "bird" means a human confirmed a bird
+                    // but not which one, and only "species" is a life tick (§2d).
+                    .put("life_tier", db.lifeTier(s.status))
                     .put("first_detected_at", s.firstDetectedAt ?: JSONObject.NULL)
                     .put("first_confirmed_at", s.firstConfirmedAt ?: JSONObject.NULL)
                     .put("lifer_detection_id", s.liferDetectionId ?: JSONObject.NULL)
                     .put("best_detection_id", s.bestDetectionId ?: JSONObject.NULL)
                     .put("total_detections", s.totalDetections)
                     .put("photo", photoJson(slugOf(s.scientific)) ?: JSONObject.NULL))
-                val confirmed = db.lifeList().count { it.status == "confirmed" }
+                val all = db.lifeList()
+                val confirmed = all.count { it.status == "confirmed" }
                 writeJson(out, 200, JSONObject().put("schema", 1)
+                    // confirmed_count keeps its meaning — species TICKS — and the tier
+                    // counts sit beside it rather than being folded in. A species confirmed
+                    // only as "a bird" is progress, but it is not a life tick.
                     .put("confirmed_count", confirmed).put("count", arr.length())
+                    .put("tier_counts", JSONObject()
+                        .put("species", confirmed)
+                        .put("bird", all.count { it.status == "bird" })
+                        .put("rejected", all.count { it.status == "rejected" })
+                        .put("machine", all.count { it.status !in setOf("confirmed", "bird", "rejected") }))
                     .put("species", arr).put("station", station.json()))
             }
             p == "/api/verify/queue" -> {
@@ -481,13 +494,118 @@ class HttpServer(
                         .put("prior", prior ?: JSONObject.NULL)
                         // A low local prior means BOTH "exciting" and "check this carefully".
                         // One flag, both meanings — see the design spec's --signal rule.
-                        .put("rarity_flag", prior != null && prior < RARITY_PRIOR)
+                        .put("rarity_flag", prior != null && prior < Database.RARITY_PRIOR)
                         .put("would_be_lifer", status?.firstConfirmedAt == null))
                 }
                 writeJson(out, 200, JSONObject().put("schema", 1).put("week", week)
                     .put("priors_available", db.priorCount() > 0)
                     .put("count", arr.length()).put("queue", arr)
                     .put("life_list_size", db.lifeList().count { it.status == "confirmed" }))
+            }
+            // THE TRIAGE LIST. A list you choose from, not a queue that advances into you:
+            // a flow with no visible end does not get started, and finishing a species has
+            // to feel like finishing.
+            p == "/api/verify/species" -> {
+                val st = settings.get()
+                val rows = db.triageSpecies(st, station.lat ?: 0.0, station.lon ?: 0.0)
+                val arr = jsonArrayOf(rows.map { s ->
+                    JSONObject()
+                        .put("taxon", s.taxon.json())
+                        .put("life_tier", s.tier)
+                        .put("bouts_total", s.boutsTotal)
+                        .put("bouts_done", s.boutsDone)
+                        .put("bouts_pending", s.boutsPending)
+                        .put("peak_confidence", round3(s.peakConfidence))
+                        .put("threshold", round3(s.threshold))
+                        .put("prior", s.prior ?: JSONObject.NULL)
+                        .put("rarity_flag", s.prior != null && s.prior < Database.RARITY_PRIOR)
+                        .put("would_be_lifer", s.wouldBeLifer)
+                        .put("stake", s.stake).put("stake_reason", s.stakeReason)
+                        .put("bulk_allowed", s.bulkAllowed)
+                        .put("last_ms", s.lastMs)
+                        .put("activity", org.json.JSONArray().also { a -> s.activity.forEach { a.put(it) } })
+                        .put("photo", photoJson(s.taxon.key) ?: JSONObject.NULL)
+                })
+                writeJson(out, 200, JSONObject().put("schema", 1)
+                    .put("count", arr.length()).put("species", arr)
+                    .put("priors_available", db.priorCount() > 0)
+                    .put("bouts_pending", rows.sumOf { it.boutsPending })
+                    .put("life_list_size", db.lifeList().count { it.status == "confirmed" }))
+            }
+            // The bouts of one species, across all days — the work of finishing it.
+            p == "/api/verify/bouts" -> {
+                val key = req.query["taxon_key"]
+                if (key.isNullOrBlank()) {
+                    writeJson(out, 400, JSONObject().put("error", "taxon_key is required")); return
+                }
+                val bouts = db.boutsForSpecies(key, settings.get())
+                val sci = bouts.firstOrNull()?.taxon?.scientific
+                val status = sci?.let { db.speciesStatus(it) }
+                // Undecided first — that is the work — then the decided ones, so a verdict
+                // can be looked at again without hunting for it.
+                val ordered = bouts.sortedWith(
+                    compareBy<Bout> { if (it.verifyState == "done") 1 else 0 }.thenByDescending { it.startMs })
+                writeJson(out, 200, JSONObject().put("schema", 1)
+                    .put("taxon_key", key).put("count", ordered.size)
+                    .put("bouts_pending", ordered.count { it.verifyState != "done" })
+                    .put("life_tier", db.lifeTier(status?.status))
+                    .put("bulk_allowed", status?.firstConfirmedAt != null &&
+                        ordered.count { it.verifyState == "done" } >= Database.BULK_MIN_CONFIRMED)
+                    .put("bouts", jsonArrayOf(ordered.map { boutJson(it) })))
+            }
+            // The two-part verdict, recorded against DETECTION IDS. Never a bout id: bouts
+            // are a read-time projection of bout_gap_s and their ids move when it does.
+            p == "/api/verify/bout" && req.method == "POST" -> {
+                val body = runCatching { JSONObject(String(req.body, Charsets.UTF_8)) }.getOrNull() ?: JSONObject()
+                val ids = body.optJSONArray("detection_ids")
+                val isGenuine = body.optString("is_genuine")
+                val isSpecies = if (body.isNull("is_species")) null else body.optString("is_species").ifBlank { null }
+                if (ids == null || ids.length() == 0) {
+                    writeJson(out, 400, JSONObject().put("error", "detection_ids must be a non-empty array")); return
+                }
+                if (isGenuine !in setOf("yes", "no", "unsure")) {
+                    writeJson(out, 400, JSONObject().put("error", "is_genuine must be yes|no|unsure")); return
+                }
+                if (isSpecies != null && isSpecies !in setOf("yes", "no", "unsure")) {
+                    writeJson(out, 400, JSONObject().put("error", "is_species must be yes|no|unsure or null")); return
+                }
+                val list = (0 until ids.length()).map { ids.getLong(it) }
+                val st = db.recordBoutVerdict(list, isGenuine, isSpecies, body.optString("note").ifBlank { null })
+                if (st == null) { writeJson(out, 404, JSONObject().put("error", "no such detection")); return }
+                writeJson(out, 200, verdictResultJson(st, list.first(), isGenuine, isSpecies, list.size))
+            }
+            // Bulk accept. Server-enforced, not merely hidden in the UI: "never for a
+            // species not yet on the life list" is a rule about the data, and a rule that
+            // only the client applies is not a rule.
+            p == "/api/verify/bulk" && req.method == "POST" -> {
+                val body = runCatching { JSONObject(String(req.body, Charsets.UTF_8)) }.getOrNull() ?: JSONObject()
+                val key = body.optString("taxon_key")
+                val ids = body.optJSONArray("detection_ids")
+                if (key.isBlank() || ids == null || ids.length() == 0) {
+                    writeJson(out, 400, JSONObject().put("error", "taxon_key and detection_ids are required")); return
+                }
+                val bouts = db.boutsForSpecies(key, settings.get())
+                val sci = bouts.firstOrNull()?.taxon?.scientific
+                val status = sci?.let { db.speciesStatus(it) }
+                if (status?.firstConfirmedAt == null) {
+                    writeJson(out, 409, JSONObject()
+                        .put("error", "not_established")
+                        .put("reason", "This species is not on the life list yet. A first record is " +
+                             "not a judgement to make in bulk — confirm one bout on its own first."))
+                    return
+                }
+                if (bouts.count { it.verifyState == "done" } < Database.BULK_MIN_CONFIRMED) {
+                    writeJson(out, 409, JSONObject()
+                        .put("error", "too_few_confirmed")
+                        .put("reason", "Confirm at least ${Database.BULK_MIN_CONFIRMED} bouts of this " +
+                             "species individually before accepting the rest in bulk."))
+                    return
+                }
+                val list = (0 until ids.length()).map { ids.getLong(it) }
+                val st = db.recordBoutVerdict(list, "yes", "yes", "bulk")
+                if (st == null) { writeJson(out, 404, JSONObject().put("error", "no such detection")); return }
+                writeJson(out, 200, verdictResultJson(st, list.first(), "yes", "yes", list.size)
+                    .put("bulk", true))
             }
             p.startsWith("/api/verify/") && req.method == "POST" -> {
                 val id = p.removePrefix("/api/verify/").toLongOrNull()
@@ -509,6 +627,25 @@ class HttpServer(
             // GET previews what would be destroyed; DELETE does it. The old button reported
             // only "Cleared." even when it had left photos and orphaned clips behind, which
             // is how it earned the description "it didn't clear everything".
+            // Download the whole database. The counterpart to the DELETE below, which has
+            // existed since the beginning with no way to take a copy first — and the phone
+            // cannot be reached from a laptop, so a download the dashboard can start is the
+            // only route off the device.
+            p == "/api/data/export" && req.method == "GET" -> {
+                val tmp = File(ctx.cacheDir, "station-export.db")
+                val size = try { db.exportTo(tmp) } catch (e: Exception) {
+                    writeJson(out, 500, JSONObject().put("error", "export failed")
+                        .put("reason", e.message ?: e.javaClass.simpleName)); return
+                }
+                val name = "station-${Detection.localDate(System.currentTimeMillis())}.db"
+                writeStatus(out, 200); writeCors(out)
+                out.write(("Content-Type: application/vnd.sqlite3\r\n" +
+                          "Content-Disposition: attachment; filename=\"$name\"\r\n" +
+                          "Cache-Control: no-store\r\nContent-Length: $size\r\n\r\n").toByteArray())
+                tmp.inputStream().use { it.copyTo(out) }
+                // The copy is a transfer buffer, not a second database to keep in sync.
+                runCatching { tmp.delete() }
+            }
             p == "/api/data" && req.method == "GET" -> {
                 val pv = db.clearPreview()
                 writeJson(out, 200, JSONObject().put("detections", pv.detections)
@@ -571,13 +708,6 @@ class HttpServer(
         }
     }
 
-    private companion object {
-        /** Below this local-occurrence prior a detection is flagged rare. Provisional: it is
-         *  a guess until the meta-model has run for this station and the distribution of
-         *  priors here can actually be looked at. Named rather than inlined for that reason. */
-        const val RARITY_PRIOR = 0.02
-    }
-
     /** BirdNET's 48-week convention: four weeks per month, the 4th absorbing the remainder.
      *  Must match how the priors were generated or every lookup is silently off. */
     private fun birdnetWeek(atMs: Long): Int {
@@ -633,6 +763,33 @@ class HttpServer(
             .put("seconds", Math.round(b.audio.seconds * 10.0) / 10.0)
             .put("covered_detections", b.audio.covered)
             .put("expected_detections", b.audio.expected))
+        // Verification travels with the bout but is STORED per detection. `partial` is a
+        // real state, not a rounding error: it is what a merged bout looks like after
+        // bout_gap_s moved, and it must be displayable as exactly that.
+        .put("verification", JSONObject()
+            .put("state", b.verifyState)
+            .put("verified_detections", b.verifiedDetections)
+            .put("is_genuine", b.verdictIsGenuine ?: JSONObject.NULL)
+            .put("is_species", b.verdictIsSpecies ?: JSONObject.NULL))
+
+    /**
+     * What a verdict changed. `is_lifer` is true only for a species IDENTIFICATION — the
+     * one answer that earns a life tick. "A bird, but I don't know what" comes back with
+     * `life_tier: "bird"` and `is_lifer: false`, because the list must never claim more
+     * than what was actually supplied (§2d).
+     */
+    private fun verdictResultJson(st: Database.SpeciesStatus, firstId: Long,
+                                  isGenuine: String, isSpecies: String?, applied: Int): JSONObject =
+        JSONObject().put("schema", 1)
+            .put("scientific", st.scientific).put("common", st.common)
+            .put("status", st.status)
+            .put("life_tier", db.lifeTier(st.status))
+            .put("is_genuine", isGenuine)
+            .put("is_species", isSpecies ?: JSONObject.NULL)
+            .put("detections_recorded", applied)
+            .put("first_confirmed_at", st.firstConfirmedAt ?: JSONObject.NULL)
+            .put("is_lifer", isGenuine == "yes" && isSpecies == "yes" && st.liferDetectionId == firstId)
+            .put("life_list_size", db.lifeList().count { it.status == "confirmed" })
 
     /** The strip's bin boundaries, so the client labels the same six periods the server
      *  binned into rather than re-deriving them and drifting. */
