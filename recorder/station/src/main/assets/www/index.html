@@ -17,6 +17,16 @@
    it does not belong here.
    ========================================================================== */
 
+/* Links. The only anchor rule in the stylesheet, and it has to be global: the
+   browser default is #0000EE on a warm near-black ground, which is both unreadable
+   and the one hardcoded colour nobody chose. It matters most for the xeno-canto
+   credit, where the licence requires the attribution to be legible, not merely
+   present. --ink-soft, underlined: a link is navigation, and navigation never earns
+   --alive, --ember or --signal (§2). */
+a { color: var(--ink-soft); text-decoration: underline; text-underline-offset: 2px; }
+a:hover { color: var(--ink); }
+a.btn { text-decoration: none; }
+
 /* ---------------------------------------------------------------- app chrome */
 .topbar {
   position: sticky; top: 0; z-index: 30;
@@ -161,7 +171,6 @@ main { max-width: 640px; margin: 0 auto; padding: var(--space-24) var(--space-16
   font-size: var(--text-28); line-height: 1.1; color: var(--ink);
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tile .n.is-text { font-family: var(--font-display); font-variation-settings: var(--axes-display); font-size: var(--text-22); }
 .tile .label { margin-top: var(--space-8); }
 
 /* ------------------------------------------------------------- detection row §6 */
@@ -252,12 +261,6 @@ main { max-width: 640px; margin: 0 auto; padding: var(--space-24) var(--space-16
    horizontal scroll and cannot imply hourly precision the data does not have. */
 .strip { display: flex; gap: 2px; margin-top: var(--space-8); }
 .strip i { flex: 1 1 0; height: 6px; border-radius: 1px; background: var(--ember); }
-.strip-key {
-  display: flex; margin-top: var(--space-4);
-  font-size: var(--text-11); letter-spacing: var(--tracking-label);
-  text-transform: uppercase; color: var(--ink-faint);
-}
-.strip-key span { flex: 1 1 0; text-align: center; }
 .sp-nums { display: flex; gap: var(--space-12); flex-wrap: wrap; align-items: baseline; }
 
 .bout { border-top: 1px solid var(--line); padding: var(--space-12) 0; }
@@ -338,7 +341,17 @@ main { max-width: 640px; margin: 0 auto; padding: var(--space-24) var(--space-16
   display: flex; gap: var(--space-12); align-items: flex-start;
   background: var(--bg-raised); border: 1px solid var(--line); border-radius: var(--r-md);
   padding: var(--space-12); min-height: var(--touch-min);
+  /* A grid item defaults to min-width:auto, so a long name — "European Herring Gull",
+     "Common Wood Pigeon" — pushed its 1fr track wider than half the viewport and the
+     whole page scrolled sideways on a phone. */
+  min-width: 0;
 }
+/* ...and having stopped it overflowing, it must not truncate either. The feed clips
+   names to one line because .det rows are a fixed 72px; these cards are not, and a
+   life list reading "Europea…" beside "Common…" is no list at all — the species name
+   is the content (§1). Half a phone width does not hold a long name on one line, so
+   here it wraps. */
+.life .taxon .common, .life .taxon .sci { white-space: normal; overflow: visible; text-overflow: clip; }
 /* An incomplete list should visibly WANT completing (§6). */
 .life.is-candidate { opacity: 0.5; border-style: dashed; background: none; }
 .life .stamp {
@@ -347,162 +360,6 @@ main { max-width: 640px; margin: 0 auto; padding: var(--space-24) var(--space-16
   font-size: var(--text-11); color: var(--ink-faint);
 }
 .life.is-lifer { border-color: var(--signal); }   /* lifer — the one place fill-less --signal earns a card border */
-
-/* ------------------------------------------------------------- verify §6
-   One detection at a time, card-stack. Not a list, not a table — a list invites
-   scanning and skipping, and the whole point of this screen is that each decision
-   gets looked at once, properly. */
-.v-wrap { display: flex; flex-direction: column; gap: var(--space-16); }
-
-/* --- the commitment screen. §6: show the remaining queue count BEFORE starting.
-   The count is a promise about how long this will take, so it gets the headline
-   treatment and the session cap sits directly under it. */
-.v-setup { display: flex; flex-direction: column; gap: var(--space-16); }
-.v-bignum {
-  font-family: var(--font-data); font-variant-numeric: tabular-nums;
-  font-size: var(--text-40); line-height: 1; color: var(--ink);
-}
-.v-setup .why { color: var(--ink-soft); font-size: var(--text-13); max-width: 46ch; }
-
-/* --- the card itself */
-.v-card { background: var(--bg-raised); border: 1px solid var(--line); border-radius: var(--r-md); }
-.v-head {
-  display: flex; align-items: center; gap: var(--space-8);
-  padding: var(--space-12) var(--space-16); border-bottom: 1px solid var(--line);
-}
-.v-head .rest { margin-left: auto; }
-/* Progress rule. --ink-faint, not --ember and certainly not --signal: how far through
-   a chore you are is not an event, and colour here would compete with the confirm
-   button sitting 300px below it. */
-.v-bar { height: 2px; background: var(--line); }
-.v-bar i { display: block; height: 100%; background: var(--ink-faint); }
-
-/* MEASURED: with the reference photo as a full-width 128px band, the confirm and reject
-   buttons landed at y=822 on a 375x812 phone — one scroll below the fold, on every
-   single card, for a chore done one-handed outdoors. The photo is a memory aid attached
-   to the name, not evidence, so it became a 96px square beside the name and the card
-   now ends at ~730. The decision is always reachable without scrolling. */
-.v-body { padding: var(--space-16); display: flex; flex-direction: column; gap: var(--space-12); }
-.v-name { display: flex; align-items: center; gap: var(--space-12); }
-.v-name .taxon { flex: 1 1 auto; min-width: 0; }
-/* The species name is the hero content (§1) and this is the largest it appears
-   outside the lifer card. Binomial italic beneath, one step down, --ink-soft. */
-.v-name .common {
-  display: block; font-family: var(--font-display); font-weight: var(--weight-display);
-  font-variation-settings: var(--axes-display); font-optical-sizing: auto;
-  font-size: var(--text-28); line-height: 1.15; color: var(--ink);
-}
-.v-name .common.is-binomial { font-style: italic; }
-.v-name .sci {
-  display: block; font-family: var(--font-display); font-style: italic;
-  font-size: var(--text-18); line-height: 1.3; color: var(--ink-soft);
-}
-.v-flags { display: flex; flex-wrap: wrap; gap: var(--space-8); align-items: center; }
-/* §7 rarity: --signal OUTLINE, never fill. It says "exciting" and "check this
-   carefully" with the same element, which is the point — one mark, both meanings.
-   Rendered only when the station actually has priors; see verifyBoutHtml. */
-.v-rare {
-  display: inline-flex; align-items: center; gap: var(--space-4);
-  font-family: var(--font-ui); font-size: var(--text-11);
-  letter-spacing: var(--tracking-label); text-transform: uppercase;
-  color: var(--signal); border: 1px solid var(--signal); border-radius: var(--r-sm);
-  padding: var(--space-4) var(--space-8); background: none;
-}
-.v-why-rare { font-size: var(--text-13); color: var(--ink-soft); }
-
-/* --- the clip. Square corners, --bg-sunken behind, full width (§6), same frame
-   chrome as the live view so the two read as the same instrument. */
-.v-spec { position: relative; background: var(--bg-sunken); border: 1px solid var(--line); border-radius: 0; }
-/* 144px, not the live view's 208px: the whole card has to fit above the fold on a
-   375x812 phone with browser chrome, and 3 s of clip needs far less height than 10 s
-   of scrolling history to stay readable. */
-.v-spec canvas { display: block; width: 100%; height: 144px; }
-.v-spec .pending {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  text-align: center; padding: var(--space-16); color: var(--ink-soft); font-size: var(--text-13);
-}
-/* Playhead. --ink, not a colour: it marks a position, it does not mean anything. */
-.v-playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--ink); opacity: 0.75; display: none; }
-
-.v-transport { display: flex; align-items: center; gap: var(--space-16); }
-/* 64px, well past the 44px floor (§4) — this is the control that gets pressed most,
-   one-handed, in the dark, and it is the only thing on the card that must never be
-   missed by a thumb. */
-.v-play {
-  flex: none; width: var(--space-64); height: var(--space-64); border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--bg-sunken); color: var(--ink);
-  border: 1px solid var(--line-strong); cursor: pointer; appearance: none;
-}
-.v-play:hover { border-color: var(--ink-faint); }
-.v-play svg { width: var(--space-24); height: var(--space-24); }
-.v-time { font-family: var(--font-data); font-variant-numeric: tabular-nums; font-size: var(--text-18); color: var(--ink); }
-.v-transport .label { margin-top: var(--space-4); }
-
-/* --- species reference image. A 96px square beside the name: this is a memory aid for
-   "what does that bird look like", not the evidence being judged — the clip is. Tap to
-   enlarge via the existing lightbox.
-   The CC licence REQUIRES the attribution to be shown wherever the image is, so the
-   credit line is part of the component and cannot be dropped for tidiness. */
-.v-photo {
-  flex: none; width: 96px; height: 96px; border-radius: var(--r-sm);
-  border: 1px solid var(--line); overflow: hidden; background: var(--bg-sunken);
-  display: flex; align-items: center; justify-content: center; color: var(--ink-faint);
-}
-.v-photo img { display: block; width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; }
-.v-photo svg { width: var(--space-32); height: var(--space-32); }
-.v-credit { font-size: var(--text-11); line-height: 1.4; color: var(--ink-faint); margin-top: calc(-1 * var(--space-4)); }
-.v-credit a { color: var(--ink-soft); }
-
-/* --- the stake (§6). Verification is a chore unless the reward is visible at the
-   moment of the decision, so this sits immediately above the buttons and never
-   anywhere else. --signal on the left rule and the ordinal ONLY when the answer
-   would be a lifer, which is one of the three sanctioned uses (§2). */
-.v-stake { border-left: 2px solid var(--line); padding-left: var(--space-12); font-size: var(--text-15); color: var(--ink-soft); }
-.v-stake .who { color: var(--ink); }
-.v-stake em { font-family: var(--font-display); font-style: italic; }
-.v-stake.is-lifer { border-left-color: var(--signal); }
-.v-stake.is-lifer .num {
-  font-family: var(--font-data); font-variant-numeric: tabular-nums; color: var(--signal);
-}
-
-/* --- the two decisions. Confirm is the action that CREATES lifers, which is the
-   third sanctioned use of --signal (§2), and it is the only filled --signal surface
-   in the app — the rarity flag stays outline precisely so the two never blur. */
-.v-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-12); }
-.v-act {
-  appearance: none; cursor: pointer; min-height: var(--space-64);
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-4);
-  font-family: var(--font-ui); font-size: var(--text-18); font-weight: 600;
-  border: 1px solid transparent; border-radius: var(--r-sm); background: none;
-}
-.v-act .key {
-  font-family: var(--font-data); font-variant-numeric: tabular-nums;
-  font-size: var(--text-11); opacity: 0.7;
-}
-.v-act.is-confirm { background: var(--signal); color: var(--bg); border-color: var(--signal); }
-.v-act.is-reject  { color: var(--void); border-color: var(--void); }
-.v-act[disabled] { opacity: 0.4; cursor: default; }
-.v-skip { width: 100%; }
-/* Keyboard hints are for desktop only (§6 says the shortcuts are a desktop affordance);
-   on a touch device they are noise printed on the two biggest buttons on the screen. */
-@media (hover: none), (pointer: coarse) { .v-act .key, .v-skip .key { display: none; } }
-
-.v-error { color: var(--ember); font-size: var(--text-13); min-height: var(--space-16); }
-
-/* --- done for now (§9 of the brief). The user has previously been trapped in an
-   unbounded queue and quit at item 45, so the session ENDS, visibly, with what was
-   achieved — not with another card. */
-.v-done { display: flex; flex-direction: column; gap: var(--space-16); }
-.v-tally { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-8); }
-.v-tally .n {
-  display: block; font-family: var(--font-data); font-variant-numeric: tabular-nums;
-  font-size: var(--text-28); line-height: 1.1; color: var(--ink);
-}
-.v-lifers { display: flex; flex-direction: column; gap: var(--space-4); }
-.v-lifers li { list-style: none; font-family: var(--font-display); font-size: var(--text-18); color: var(--signal); }
-.v-lifers li i { font-size: var(--text-13); color: var(--ink-soft); }
-.v-done .row { display: flex; gap: var(--space-8); flex-wrap: wrap; }
 
 /* ------------------------------------------------------------- lifer card §6
    Full-bleed, the clip's own spectrogram as artwork, the emotional peak of the
@@ -1604,7 +1461,10 @@ async function loadList() {
   state.lifeList = await apiMaybe("/api/life-list");
   const rows = (state.lifeList && Array.isArray(state.lifeList.species)) ? state.lifeList.species : null;
 
-  let confirmed = [], waiting = [], reachable = true;
+  // §2d: "the station said zero" and "the station did not answer" are different facts,
+  // and the headline had been rendering both as an em dash — while the panel directly
+  // beneath it said "No species confirmed yet.", so the page contradicted itself.
+  let confirmed = [], waiting = [], reachable = true, countKnown = true;
   if (rows) {
     // Rejected species are deliberately dropped from both lists: a rejection is a
     // decision, and re-showing it as "waiting" would invite making it twice.
@@ -1617,6 +1477,7 @@ async function loadList() {
     // when a species was LAST heard, so the label says so rather than passing a
     // last-seen off as a first.
     const sp = await apiMaybe("/api/species");
+    countKnown = !!(sp && sp.species);
     confirmed = ((sp && sp.species) || []).map(e => ({
       taxon: e.taxon, photo: e.photo || null, ms: e.last_ms, msLabel: "last heard", lifer: false,
     }));
@@ -1634,8 +1495,14 @@ async function loadList() {
     waiting = [...byKey.values()].sort((a, b) => b.ms - a.ms);
   }
 
-  $("lifeCount").textContent = confirmed.length ? String(confirmed.length) : "—";
+  $("lifeCount").textContent = countKnown ? String(confirmed.length) : "—";
   $("lifeConfirmed").innerHTML = confirmed.map(lifeCardHtml).join("");
+  // Same distinction one level down, phrased the way the candidates panel below
+  // already phrases it: an empty life list is a fact about the station, an
+  // unreachable one is a fact about the network.
+  $("lifeConfirmedEmpty").textContent = countKnown
+    ? "No species confirmed yet."
+    : "Could not reach the station.";
   $("lifeConfirmedEmpty").classList.toggle("hidden", confirmed.length > 0);
   renderTiles();   // "new lifers this week" can only be filled once the life list loads
 
@@ -2792,9 +2659,10 @@ function connectSSE() {
 }
 
 document.addEventListener("click", e => {
-  // .v-photo img too: the verification card's reference photo is the one image on the
-  // page a person actually needs to look at closely before deciding.
-  const img = e.target.closest(".thumb img, .v-photo img");
+  // Every species thumbnail on the page, wherever it appears — the feed, the day list,
+  // the life list, the triage row. They are all 44px or smaller, which is enough to
+  // recognise a bird already known and not enough to check one that isn't.
+  const img = e.target.closest(".thumb img");
   if (!img) return;
   $("lightboxImg").src = img.src;
   $("lightbox").classList.add("is-open");

@@ -205,15 +205,34 @@ below the label block. This is the emotional peak of the product — give it
 room, and never show more than one at a time.
 
 ### Verification interface
-One detection at a time, card-stack. Large play control, the clip's own
-spectrogram, species reference image, and two large buttons: confirm
-(`--signal`) and reject (`--void` outline), plus a smaller skip. Keyboard
-`y` / `n` / `s` on desktop.
+**Triage, not a card-stack.** The card-stack described here through PR 2 — one
+detection at a time, drawn from a single undifferentiated queue — was removed:
+an unbounded queue of individually identical decisions is what got abandoned at
+item 45. Its CSS was deleted in the 2026-08-10 sweep. Do not rebuild it.
 
-Always show the stake above the buttons: *"Confirming adds Spotted Crake to
-your life list — #11."* Verification is a chore unless the reward is visible at
-the moment of the decision. Also show remaining queue count so the commitment
-is known before starting.
+The unit of judgement is the **bout**, not the detection, and the entry point is
+a **species list ordered by what is at stake** — possible new species first,
+then ones unlikely to be here, then borderline scores. Picking a species is
+itself the commitment: the count of bouts is shown before entering, so the size
+of the job is known in advance rather than discovered halfway through.
+
+Within a species, one bout at a time with a **two-part verdict**, asked as two
+plain questions rather than one compound one: *is this really a bird* (or
+insect, or whatever group the taxon belongs to — the copy is group-aware, and
+asking "is this a bird?" of a bush-cricket is a bug), then *is it this species*.
+"Can't tell" is a first-class answer, not a skip. Buttons are stacked full
+width, not a row of equal tiles — the answers are not equivalent and a row
+invites tapping the middle one.
+
+Always show the stake with the decision: *"would be new on the life list."*
+Verification is a chore unless the reward is visible at the moment of deciding.
+Bulk accept unlocks only once the species is on the life list and a couple of
+its bouts have been confirmed individually.
+
+Reference audio sits beside the clip where it exists (§11q in DESIGN.md) so the
+question is "does this sound like that", which is answerable, rather than "name
+this bird", which is not. Its four states — no key configured, ready, none
+available, lookup failed — are four different sentences, never one shrug.
 
 ### Spectrogram
 Square corners, full container width, `--bg-sunken` behind. Palette ramp:

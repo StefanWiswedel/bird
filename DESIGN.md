@@ -982,6 +982,20 @@ its own measurement.
 - Regional expansion = new probe per region (filter dataset to local species, retrain probe; embedding model never changes).
 
 ## 9. Changelog
+- (2026-08-10) **Dashboard CSS sweep, and three defects it uncovered** (§11j). Removing the
+  card-stack verification UI in §11p left its stylesheet behind: 163 lines styling elements
+  that no longer exist. Deleted, and the stylesheet now has **zero unused class selectors**.
+  Three things fell out of doing it. The card's `.v-credit a` was the only anchor rule in
+  the file, so deleting it would have left every link on the page rendering in the browser's
+  default blue on a warm near-black ground — including the xeno-canto credit, where the
+  licence requires the attribution to be *legible*, not merely present; there is now one
+  global link rule. The life list's two-column grid scrolled the whole page sideways on a
+  phone (grid items default to `min-width: auto`, and "European Herring Gull" does not fit
+  half a 390px viewport); fixed, and the name **wraps** rather than truncating, because a
+  list reading "Europea…" beside "Common…" is not a list. And the species-count headline
+  rendered both "the station says zero" and "the station did not answer" as an em dash while
+  the panel directly beneath it asserted "No species confirmed yet." — the page contradicted
+  itself, in exactly the way §2d exists to prevent. Both now say which one it is.
 - (2026-08-09) **Reference recordings, and thresholds learned from verdicts** (§11q).
   Identification becomes comparison: when a detection proposes a species, the station
   fetches a known-good recording of it from xeno-canto and offers it beside the clip, so
@@ -1933,20 +1947,33 @@ reading as plasticky.
   life list is kept by default (only `candidate` species purged; `confirmed`/`rejected` are
   human decisions and survive) unless the caller explicitly opts in with
   `?life_list=true` — destroying it is a separate, deliberate act.
-- **Photo lightbox** for full-size viewing from any thumbnail.
+- **Photo lightbox** for full-size viewing from any thumbnail. Bound to `.thumb img`, which
+  is every species thumbnail the page renders — the feed, the day list, the life list and
+  the triage row all use the same component, so there is one selector rather than a list of
+  places that has to be kept in step.
+- **One global link rule.** Links are `--ink-soft` and underlined. This has to be global,
+  not per-component: an unstyled anchor falls back to the browser's `#0000EE`, which is
+  unreadable on this ground and is the one colour in the app nobody chose. It matters most
+  for the xeno-canto attribution (§11q), where the licence requires the credit to be
+  legible. Navigation never earns `--alive`, `--ember` or `--signal`.
 - **Build stamp in the header**, beside the station name, not tucked into Settings — it
   answers "is this the build I just installed," not "what's the device's health," which are
   different questions. (§11k)
 
 ### 11k. Schema, versioning, and build identity
 
-`station.db` (`SQLiteOpenHelper`, current version **5**): `detections`, `species_settings`,
-`outbox_delivery`, `species_status`, `verifications`, `species_prior`. `onUpgrade`'s
-history is worth reading in the source (`Database.kt`) precisely because two of its five
-versions issued an unconditional `DELETE FROM detections` before the life list existed to
-protect — left in place rather than rewritten, since a device that already ran them can't
-un-run them, with the v5-onward pinning rule (§11g) as the fix that actually matters going
-forward.
+`station.db` (`SQLiteOpenHelper`, current version **7**): `detections`, `species_settings`,
+`outbox_delivery`, `species_status`, `verifications`, `species_prior` — the same six tables
+as v5. v6 added `detections.clip_start_ms` (§11m); v7 rebuilt `verifications` around the
+two-part verdict (§11p). Nothing is keyed on `bout_id`: a bout is a read-time projection
+that moves when `bout_gap_s` moves, so verdicts key on detection ids (§11p). A fresh
+install lands directly on **v7**. `onUpgrade`'s history is worth reading in
+the source (`Database.kt`) precisely because two of its early versions issued an
+unconditional `DELETE FROM detections` before the life list existed to protect — left in
+place rather than rewritten, since a device that already ran them can't un-run them, with
+the v5-onward pinning rule (§11g) as the fix that actually matters going forward. That rule
+governs every future migration: **`Database.kt:214`, preserve `pinnedDetectionIds()`, never
+copy the unconditional delete.**
 
 **A build stamp exists because `versionName` couldn't answer the only question that
 actually got asked.** `versionName` stayed `"0.1.0"` across six installs in one session
